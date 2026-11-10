@@ -1,47 +1,78 @@
 # beholder-brother
 
-Minimal, near-zero-overhead Linux telemetry pair for low-spec self-hosted machines (Raspberry Pis, old laptops, SBCs).
+A lightweight pair of tools to monitor low-power Linux boxes (Raspberry Pis, old laptops, mini-PCs) without turning the monitoring tool into the heaviest process on the machine.
 
-- **`beholder`**: Headless daemon. Reads `/proc` and `/sys` directly, appends a line of text to a log, goes back to sleep. Once a day, crunches raw numbers into daily aggregates.
-- **`brother`**: Companion visualizer. Reads the daily aggregates and renders a lightweight dashboard.
+- **`beholder`**: The daemon. Wakes up, grabs a few numbers from `/proc` and `/sys`, checks if the internet is alive, appends a line to a plain text file, and goes back to sleep. Once a day, it rolls those raw lines into clean daily summaries.
+- **`brother`**: The viewer. Reads the daily summaries and draws simple charts on a web page or right on your laptop.
+
+---
+
+## What We Collect (The Core 5)
+
+We deliberately don't collect hundreds of metrics. If you need 500 different kernel gauges, use Netdata or Prometheus. We only track what actually matters on a home server:
+
+1. **CPU Load %**: Sourced directly from `/proc/stat`.
+2. **Memory Usage %**: Total vs Available memory from `/proc/meminfo`.
+3. **Disk Usage %**: Space used on root (`/`) via the `statvfs` syscall.
+4. **Temperature (°C)**: SoC / CPU thermal zone from `/sys/class/thermal/`.
+5. **Network Connectivity (1/0)**: A quick, zero-dependency 500ms TCP probe (default `1.1.1.1:53`). No raw sockets, no root privileges, no DNS delays. If it connects, internet is up (`1`); if it times out, it's down (`0`).
 
 ---
 
 ## How It Works
 
 ### 1. Sampling (`beholder`)
-Every $N$ seconds (configurable, default `15s`), `beholder` wakes up, reads kernel stats via open file descriptors, appends a single line, and calls `nanosleep`:
+Every $N$ milliseconds (default `10000ms` / 10s), `beholder` takes one sample and appends a single line:
 
 ```text
-# timestamp cpu_user cpu_system cpu_idle mem_used_kb mem_total_kb temp_c
-1731198000 12040 3410 894320 412000 1024000 48.2
-1731198015 12055 3415 894460 413200 1024000 48.5
+# timestamp cpu_pct mem_pct disk_pct temp_c net_ok
+1731198000  4.2     38.5    62.1     48.2   1
+1731198010  5.1     38.5    62.1     48.5   1
+1731198020  4.8     38.6    62.1     48.3   0
 ```
 
-- No subprocess forks (`top`, `ps`, `free`).
-- No heap allocations in the tick loop.
-- No database engine or background worker threads.
+- Zero child processes spawned (`top`, `free`, or `ping`).
+- Zero memory allocations in the tick loop.
+- Zero databases. Just plain append-only text.
 
-### 2. Rollup (`beholder --rollup`)
-Once every 24 hours (or triggered via CLI / `SIGHUP`), `beholder` rolls raw data into fixed daily buckets (min, avg, max, 95th percentile) and rotates the raw log:
+### 2. Daily Rollup (`beholder --rollup`)
+Once every 24 hours (or on demand), `beholder` crunches raw samples into daily aggregates (min, avg, max, 95th percentile) and resets the raw log so your storage doesn't fill up:
 
 ```text
-# date metric min avg max p95
-2026-11-09 cpu_pct 0.8 4.2 88.1 12.0
-2026-11-09 mem_pct 38.1 40.2 45.0 42.1
-2026-11-09 temp_c  42.0 47.3 65.0 52.1
+# date       metric    min   avg   max   p95
+2026-11-10   cpu_pct   0.8   4.2   88.1  12.0
+2026-11-10   mem_pct   38.1  40.2  45.0  42.1
+2026-11-10   disk_pct  62.1  62.1  62.1  62.1
+2026-11-10   temp_c    42.0  47.3  65.0  52.1
+2026-11-10   net_down_sec 0  30    --    --
 ```
+
+*Downtime math is simple: count the `0` ticks in `net_ok` and multiply by interval seconds. No in-memory stopwatches.*
 
 ### 3. Visualizing (`brother`)
-Reads rolled-up summaries and displays performance over days/weeks/months:
-- **Embedded mode**: Single-binary HTTP listener on a local port (e.g. `http://<server-ip>:6060`) serving raw HTML/SVG. Zero JavaScript frameworks.
-- **Remote sync mode**: Pull aggregate files over `rsync`/`ssh` to view locally on your laptop without running any web server on the monitored machine.
+Reads the daily summaries:
+- **Local web mode**: Starts a tiny HTTP listener on the server (e.g. `http://server-ip:6060`) serving plain HTML/SVG. No React, no Vue, no external CDN requests.
+- **Laptop sync mode**: Sync the text logs to your laptop with `rsync` or `scp` and view them locally, keeping 0 bytes of web server overhead on the monitored server.
 
 ---
+
+## Command Line Options
+
+```text
+Usage: beholder [OPTIONS]
+
+Options:
+    -h, --help              Print this help message
+    -v, --version           Print version information
+    -i, --interval <MS>     Sampling interval in ms (default: 10000)
+    -l, --log-dir <PATH>    Directory for raw data (default: /var/log/beholder)
+    -r, --rollup            Crunch existing logs into daily summaries and exit
+    -n, --network <ADDR>    TCP address to probe for connectivity (default: 1.1.1.1:53)
+```
 
 ## Build & Run
 
 ```bash
 cargo build --release
-./target/release/beholder --interval 15s --log-dir /var/log/beholder
+./target/release/beholder-brother --interval 10000 --log-dir ./data
 ```
