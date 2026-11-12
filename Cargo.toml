@@ -7,3 +7,7 @@ edition = "2024"
 lexopt = "0.3.2"
 ctrlc = { version = "3.5.1", features = ["termination"] }
 nix = { version = "0.31", features = ["fs"] }
+time = { version = "0.3", default-features = false, features = [
+    "formatting",
+    "macros",
+] }
