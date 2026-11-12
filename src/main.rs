@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         //println!("Sample: {:?}", sample);
         savelog::append_sample(&config.log_dir, &sample)?;
 
-        if tick % 60 == 0 {
+        if tick.is_multiple_of(60) {
             let disk_samples = sense::sense_disks(&config)?;
             savelog::append_disks(&config.log_dir, sample.timestamp, &disk_samples)?;
             // println!("Disk samples: {:?}", disk_samples);
