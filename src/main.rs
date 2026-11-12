@@ -12,6 +12,7 @@ struct Config {
     log_dir: PathBuf,
     rollup: bool,
     network_target: SocketAddr,
+    mounts: Vec<PathBuf>,
 }
 
 impl Default for Config {
@@ -21,6 +22,7 @@ impl Default for Config {
             log_dir: PathBuf::from("/var/log/beholder"),
             rollup: false,
             network_target: SocketAddr::from(([1, 1, 1, 1], 53)),
+            mounts: vec![PathBuf::from("/")],
         }
     }
 }
@@ -42,14 +44,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut prev_cpu = sense::PreviousCpuTick::new();
+    let mut tick: u64 = 0;
 
     while running.load(Ordering::SeqCst) {
         // read sensor data
         let sample = sense::sense(&config, &mut prev_cpu)?;
-        println!("Sample: {:?}", sample);
-        // save data in temporal log
-        // either here or in sense.rs
+        //println!("Sample: {:?}", sample);
+        savelog::append_sample(&config.log_dir, &sample)?;
 
+        if tick % 60 == 0 {
+            let disk_samples = sense::sense_disks(&config)?;
+            savelog::append_disks(&config.log_dir, sample.timestamp, &disk_samples)?;
+            // println!("Disk samples: {:?}", disk_samples);
+            tick = 0;
+        }
+
+        tick += 1;
         // nap for configured time
         std::thread::sleep(std::time::Duration::from_millis(config.interval_ms));
     }
@@ -68,11 +78,12 @@ Options:
     -l, --log-dir <PATH>    Directory for raw data (default: /var/log/beholder)
     -r, --rollup            Crunch existing logs into daily summaries and exit
     -n, --network <ADDR>    TCP address to probe for connectivity (default: 1.1.1.1:53)
+    -m, --mount             Path to mount points (default: /) (it can be repeated)
 
 Sensors:
     - CPU load %
     - Memory usage %
-    - Disk usage %
+    - Disk usage % (considerng 5% root reserve as used)
     - Temperature (°C)
     - Network uptime (probe 1/0)
 "#
@@ -86,6 +97,7 @@ fn print_version() {
 fn parse_args() -> Result<Option<Config>, lexopt::Error> {
     let mut parser = lexopt::Parser::from_env();
     let mut cfg = Config::default();
+    let mut custom_mounts = false;
 
     while let Some(arg) = parser.next()? {
         match arg {
@@ -108,6 +120,16 @@ fn parse_args() -> Result<Option<Config>, lexopt::Error> {
             }
             Short('n') | Long("network") => {
                 cfg.network_target = parser.value()?.parse()?;
+            }
+            Short('m') | Long("mount") => {
+                if !custom_mounts {
+                    custom_mounts = true;
+                    cfg.mounts.clear();
+                }
+                let path = PathBuf::from(parser.value()?);
+                if !cfg.mounts.contains(&path) {
+                    cfg.mounts.push(path);
+                }
             }
             _ => return Err(arg.unexpected()),
         }
