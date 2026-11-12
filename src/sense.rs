@@ -1,6 +1,9 @@
 use core::error;
 use std::error::Error;
 use std::fs;
+use std::net::TcpStream;
+use std::path::PathBuf;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::Config;
@@ -10,9 +13,14 @@ pub struct Sample {
     pub timestamp: u64,
     pub cpu_pct: f32,
     pub mem_pct: f32,
-    pub disk_pct: f32,
     pub temp_c: Option<f32>,
     pub net_ok: bool,
+}
+
+#[derive(Debug)]
+pub struct DiskSample {
+    pub mount: PathBuf,
+    pub used_pct: f32,
 }
 
 pub struct PreviousCpuTick {
@@ -42,14 +50,15 @@ pub fn sense(
 
     let cpu_pct = read_cpu_pct(prev_cpu, timestamp)?;
     let mem_pct = read_mem_pct()?;
+    let temp_c = read_temp_c();
+    let net_ok = check_network(cfg.network_target);
 
     Ok(Sample {
         timestamp,
         cpu_pct,
         mem_pct,
-        disk_pct: 0.0,
-        temp_c: None,
-        net_ok: false,
+        temp_c,
+        net_ok,
     })
 }
 
@@ -127,4 +136,42 @@ fn read_mem_pct() -> Result<f32, Box<dyn std::error::Error>> {
     let pct = (used as f32 / total as f32) * 100.0;
 
     Ok(pct)
+}
+
+pub fn sense_disks(cfg: &Config) -> Result<Vec<DiskSample>, Box<dyn std::error::Error>> {
+    let mut results = Vec::new();
+
+    for path in &cfg.mounts {
+        let stat = nix::sys::statvfs::statvfs(path)?;
+
+        let total = stat.blocks();
+        let free = stat.blocks_free();
+        let avail = stat.blocks_available();
+
+        let used = total.saturating_sub(free);
+        let total_user = used + avail;
+
+        let pct = if total_user == 0 {
+            0.0
+        } else {
+            (used as f32 / total_user as f32) * 100.0
+        };
+
+        results.push(DiskSample {
+            mount: path.clone(),
+            used_pct: pct,
+        });
+    }
+
+    Ok(results)
+}
+
+fn read_temp_c() -> Option<f32> {
+    let raw = fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").ok()?;
+    let milli: f32 = raw.trim().parse().ok()?;
+    Some(milli / 1000.0)
+}
+
+fn check_network(target: std::net::SocketAddr) -> bool {
+    TcpStream::connect_timeout(&target, Duration::from_millis(500)).is_ok()
 }
