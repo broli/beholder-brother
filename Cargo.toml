@@ -10,4 +10,5 @@ nix = { version = "0.31", features = ["fs"] }
 time = { version = "0.3", default-features = false, features = [
     "formatting",
     "macros",
+    "parsing",
 ] }
