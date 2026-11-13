@@ -4,13 +4,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod rollout;
 mod savelog;
 mod sense;
+use rollout::ArchiveType;
 
 struct Config {
     interval_ms: u64,
     log_dir: PathBuf,
-    rollup: bool,
+    retain_days: u64,
+    history_days: u64,
+    archive_dir: PathBuf,
+    archive_type: ArchiveType,
     network_target: SocketAddr,
     mounts: Vec<PathBuf>,
 }
@@ -20,7 +25,10 @@ impl Default for Config {
         Self {
             interval_ms: 10000,
             log_dir: PathBuf::from("/var/log/beholder"),
-            rollup: false,
+            retain_days: 7,
+            history_days: 180,
+            archive_dir: PathBuf::from("/var/log/beholder/archive"),
+            archive_type: ArchiveType::Gzip,
             network_target: SocketAddr::from(([1, 1, 1, 1], 53)),
             mounts: vec![PathBuf::from("/")],
         }
@@ -72,13 +80,15 @@ fn print_usage() {
         r#"Usage: beholder [OPTIONS]
 
 Options:
-    -h, --help              Print this help message
-    -v, --version           Print version information
-    -i, --interval <MS>     Sampling interval in ms (default: 10000)
-    -l, --log-dir <PATH>    Directory for raw data (default: /var/log/beholder)
-    -r, --rollup            Crunch existing logs into daily summaries and exit
-    -n, --network <ADDR>    TCP address to probe for connectivity (default: 1.1.1.1:53)
-    -m, --mount             Path to mount points (default: /) (it can be repeated)
+    -h, --help                  Print this help message
+    -v, --version               Print version information
+    -i, --interval <MS>         Sampling interval in ms (default: 10000)
+    -l, --log-dir <PATH>        Directory for raw data (default: /var/log/beholder)
+    -r, --retain-days <DAYS>    amount of days to retain daily detailed logs. Default to 7 days
+    -H, --history-days <DAYS>   amount of days to retain history logs. Default to 180 days. More will look bad in the charts
+    -A, --archive <TYPE>        Create a compressed archive of the daily logs instead of deleting them. Can use none for no archive, gzip (default) for compressed, and plain for uncompressed. 
+    -n, --network <ADDR>        TCP address to probe for connectivity (default: 1.1.1.1:53)
+    -m, --mount                 Path to mount points (default: /) (it can be repeated)
 
 Sensors:
     - CPU load %
@@ -94,7 +104,7 @@ fn print_version() {
     println!("Beholder Version {}", env!("CARGO_PKG_VERSION"));
 }
 
-fn parse_args() -> Result<Option<Config>, lexopt::Error> {
+fn parse_args() -> Result<Option<Config>, Box<dyn std::error::Error>> {
     let mut parser = lexopt::Parser::from_env();
     let mut cfg = Config::default();
     let mut custom_mounts = false;
@@ -114,9 +124,28 @@ fn parse_args() -> Result<Option<Config>, lexopt::Error> {
             }
             Short('l') | Long("log-dir") => {
                 cfg.log_dir = PathBuf::from(parser.value()?);
+                cfg.archive_dir = cfg.log_dir.join("archive");
             }
-            Short('r') | Long("rollup") => {
-                cfg.rollup = true;
+            Short('r') | Long("retain-days") => {
+                cfg.retain_days = parser.value()?.parse()?;
+            }
+            Short('H') | Long("history-days") => {
+                cfg.history_days = parser.value()?.parse()?;
+            }
+            Short('A') | Long("archive") => {
+                let archive_type = parser.value()?;
+                cfg.archive_type = match archive_type.to_str() {
+                    Some("none") => ArchiveType::None,
+                    Some("gzip") => ArchiveType::Gzip,
+                    Some("plain") => ArchiveType::Plain,
+                    _ => {
+                        return Err(format!(
+                            "invalid archive type: {}",
+                            archive_type.to_string_lossy()
+                        )
+                        .into());
+                    }
+                };
             }
             Short('n') | Long("network") => {
                 cfg.network_target = parser.value()?.parse()?;
@@ -131,7 +160,7 @@ fn parse_args() -> Result<Option<Config>, lexopt::Error> {
                     cfg.mounts.push(path);
                 }
             }
-            _ => return Err(arg.unexpected()),
+            _ => return Err(arg.unexpected().into()),
         }
     }
     Ok(Some(cfg))
