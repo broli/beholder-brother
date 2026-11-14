@@ -3,11 +3,12 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+use time::{Date, OffsetDateTime};
 
 mod rollout;
 mod savelog;
 mod sense;
-use rollout::ArchiveType;
 
 struct Config {
     interval_ms: u64,
@@ -35,6 +36,14 @@ impl Default for Config {
     }
 }
 
+#[derive(Default)]
+pub enum ArchiveType {
+    Plain,
+    #[default]
+    Gzip,
+    None,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let running = Arc::new(AtomicBool::new(true));
     //not cloning, since i used ARC, this is a second pointer to the same heap space
@@ -54,6 +63,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_cpu = sense::PreviousCpuTick::new();
     let mut tick: u64 = 0;
 
+    let mut last_rotate_day = None;
+
     while running.load(Ordering::SeqCst) {
         // read sensor data
         let sample = sense::sense(&config, &mut prev_cpu)?;
@@ -65,6 +76,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             savelog::append_disks(&config.log_dir, sample.timestamp, &disk_samples)?;
             // println!("Disk samples: {:?}", disk_samples);
             tick = 0;
+        }
+        let today = return_today()?;
+        if last_rotate_day != Some(today) {
+            rollout::rotate(&config.log_dir, &config.archive_type)?;
+            last_rotate_day = Some(today);
         }
 
         tick += 1;
@@ -164,4 +180,14 @@ fn parse_args() -> Result<Option<Config>, Box<dyn std::error::Error>> {
         }
     }
     Ok(Some(cfg))
+}
+
+pub fn return_today() -> Result<Date, Box<dyn std::error::Error>> {
+    Ok(OffsetDateTime::from_unix_timestamp(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    )?
+    .date())
 }
