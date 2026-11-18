@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let today = return_today()?;
         if last_rotate_day != Some(today) {
-            rollout::rotate(&config.log_dir, &config.archive_type)?;
+            rollout::rollup_and_retire(&config, &today)?;
             last_rotate_day = Some(today);
         }
 
@@ -191,3 +191,11 @@ pub fn return_today() -> Result<Date, Box<dyn std::error::Error>> {
     )?
     .date())
 }
+
+#[cfg(debug_assertions)]
+fn print_debug(msg: &str) {
+    eprintln!("[debug] {msg}");
+}
+
+#[cfg(not(debug_assertions))]
+fn print_debug(_msg: &str) {}
