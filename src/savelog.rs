@@ -5,12 +5,16 @@ use std::path::Path;
 use time::OffsetDateTime;
 use time::macros::format_description;
 
-pub fn append_sample(log_dir: &Path, sample: &Sample) -> Result<(), Box<dyn std::error::Error>> {
+pub fn append_sample(
+    log_dir: &Path,
+    sample: &Sample,
+    interval_ms: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut file = open_daily_log(
         log_dir,
         "raw",
         sample.timestamp,
-        "# timestamp cpu_pct mem_pct temp_c net_ok",
+        "# timestamp cpu_pct mem_pct temp_c net_ok interval_ms",
     )?;
 
     write!(
@@ -22,7 +26,7 @@ pub fn append_sample(log_dir: &Path, sample: &Sample) -> Result<(), Box<dyn std:
         Some(t) => write!(file, "{:.1}", t)?,
         None => write!(file, "-")?,
     }
-    writeln!(file, " {}", u8::from(sample.net_ok))?;
+    writeln!(file, " {} {}", u8::from(sample.net_ok), interval_ms)?;
 
     Ok(())
 }
