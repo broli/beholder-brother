@@ -63,8 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(None) => {}
             Err(err) => {
-                eprintln!("HTTP accept error: {err}");
-                break;
+                return Err(format!("HTTP accept error: {err}").into());
             }
         }
     }
@@ -88,8 +87,9 @@ fn handle_request(
     }
 
     let respond_500 = |req: Request, err: &dyn std::fmt::Display| {
-        let resp = Response::from_string(format!("500 Internal Server Error: {err}\n"))
-            .with_status_code(StatusCode(500));
+        eprintln!("Internal server error: {err}");
+        let resp =
+            Response::from_string("500 Internal Server Error\n").with_status_code(StatusCode(500));
         let _ = req.respond(resp);
     };
 

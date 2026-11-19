@@ -265,7 +265,7 @@ pub fn render_page(data: &DashboardData) -> String {
             let open_attr = if idx == 0 { " open" } else { "" };
             let _ = writeln!(
                 html,
-                r#"<details class="day-card"{open_attr}><summary>{date} — {samples} samples, {outages} network drops</summary><div class="chart-grid">{cpu}{mem}{temp}</div></details>"#,
+                r#"<details class="day-card"{open_attr}><summary>{date} — {samples} samples, {outages} offline samples</summary><div class="chart-grid">{cpu}{mem}{temp}</div></details>"#,
                 date = escape_xml(&day.date_label),
                 samples = day.samples,
                 outages = day.outages,

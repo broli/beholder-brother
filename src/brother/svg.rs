@@ -65,8 +65,12 @@ fn compute_bounds(values: impl Iterator<Item = f32>, fixed: Option<(f32, f32)>) 
 }
 
 fn start_svg_card(buf: &mut String, title: &str) {
+    start_svg_card_sized(buf, title, CHART_H);
+}
+
+fn start_svg_card_sized(buf: &mut String, title: &str, card_h: f32) {
     let total_w = CHART_W + SHADOW_OFFSET;
-    let total_h = CHART_H + SHADOW_OFFSET;
+    let total_h = card_h + SHADOW_OFFSET;
     let _ = writeln!(
         buf,
         r#"<svg viewBox="0 0 {total_w} {total_h}" class="chart-svg" role="img" aria-label="{title}">"#,
@@ -75,11 +79,11 @@ fn start_svg_card(buf: &mut String, title: &str) {
     // Solid +5,+5 offset shadow card behind the chart frame
     let _ = writeln!(
         buf,
-        r#"  <rect x="{SHADOW_OFFSET}" y="{SHADOW_OFFSET}" width="{CHART_W}" height="{CHART_H}" rx="10" fill="var(--shadow)"/>"#
+        r#"  <rect x="{SHADOW_OFFSET}" y="{SHADOW_OFFSET}" width="{CHART_W}" height="{card_h}" rx="10" fill="var(--shadow)"/>"#
     );
     let _ = writeln!(
         buf,
-        r#"  <rect x="0" y="0" width="{CHART_W}" height="{CHART_H}" rx="10" fill="var(--surface)" stroke="var(--overlay)" stroke-width="1"/>"#
+        r#"  <rect x="0" y="0" width="{CHART_W}" height="{card_h}" rx="10" fill="var(--surface)" stroke="var(--overlay)" stroke-width="1"/>"#
     );
     let _ = writeln!(
         buf,
@@ -140,18 +144,29 @@ pub fn render_raw_line_chart(
     let (y_min, y_max) = compute_bounds(points.iter().filter_map(extract), fixed_bounds);
     draw_y_grid(&mut buf, y_min, y_max, unit);
 
-    let flush_segment = |buf: &mut String, segment: &mut String| {
-        if !segment.is_empty() {
-            let _ = writeln!(
-                buf,
-                r#"  <polyline fill="none" stroke="var({color_var})" stroke-width="2" stroke-linejoin="round" points="{segment}"/>"#
-            );
-            segment.clear();
+    let flush_segment = |buf: &mut String,
+                         segment: &mut String,
+                         single: &mut Option<(f32, f32, f32)>| {
+        if let Some((x, y, val)) = single.take() {
+            if segment.split_whitespace().count() == 1 {
+                let _ = writeln!(
+                    buf,
+                    r#"  <circle cx="{x:.1}" cy="{y:.1}" r="3.5" fill="var({color_var})"><title>{val:.1}{unit}</title></circle>"#,
+                    unit = escape_xml(unit)
+                );
+            } else if !segment.is_empty() {
+                let _ = writeln!(
+                    buf,
+                    r#"  <polyline fill="none" stroke="var({color_var})" stroke-width="2" stroke-linejoin="round" points="{segment}"/>"#
+                );
+            }
         }
+        segment.clear();
     };
 
-    // Draw contiguous polyline segments (splitting on None gaps such as missing temp_c)
+    // Draw contiguous polyline segments (emitting circles for isolated 1-point segments)
     let mut segment = String::new();
+    let mut single: Option<(f32, f32, f32)> = None;
     for (i, p) in points.iter().enumerate() {
         if let Some(val) = extract(p) {
             let x = map_x(i, points.len());
@@ -160,32 +175,23 @@ pub fn render_raw_line_chart(
                 segment.push(' ');
             }
             let _ = write!(segment, "{x:.1},{y:.1}");
+            single = Some((x, y, val));
         } else {
-            flush_segment(&mut buf, &mut segment);
+            flush_segment(&mut buf, &mut segment, &mut single);
         }
     }
-    flush_segment(&mut buf, &mut segment);
+    flush_segment(&mut buf, &mut segment, &mut single);
 
-    // Highlight single points or network outage ticks at the bottom axis
+    // Highlight network outage ticks at the bottom axis
     let base_y = PAD_TOP + PLOT_H;
     for (i, p) in points.iter().enumerate() {
-        let x = map_x(i, points.len());
         if !p.net_ok {
+            let x = map_x(i, points.len());
             let _ = writeln!(
                 buf,
                 r#"  <line x1="{x:.1}" y1="{y1:.1}" x2="{x:.1}" y2="{base_y:.1}" stroke="var(--red)" stroke-width="2"><title>Network down @ {ts}</title></line>"#,
                 ts = p.timestamp,
                 y1 = base_y - 8.0
-            );
-        }
-        if points.len() == 1
-            && let Some(val) = extract(p)
-        {
-            let y = map_y(val, y_min, y_max);
-            let _ = writeln!(
-                buf,
-                r#"  <circle cx="{x:.1}" cy="{y:.1}" r="3.5" fill="var({color_var})"><title>{val:.1}{unit}</title></circle>"#,
-                unit = escape_xml(unit)
             );
         }
     }
@@ -355,18 +361,24 @@ pub fn render_net_down_chart(days: &[HistoryDay]) -> String {
 /// Renders horizontal disk usage bars for the latest snapshot of each mount point.
 pub fn render_disk_bars(mounts: &[(&str, f32)]) -> String {
     let mut buf = String::with_capacity(1024);
-    start_svg_card(&mut buf, "Disk Usage (latest)");
-
     if mounts.is_empty() {
+        start_svg_card(&mut buf, "Disk Usage (latest)");
         draw_empty_state(&mut buf, "No disk samples available");
         return buf;
     }
 
+    let row_h = if mounts.len() <= 5 {
+        (PLOT_H / mounts.len() as f32).clamp(22.0, 34.0)
+    } else {
+        28.0
+    };
+    let card_h = (PAD_TOP + 12.0 + mounts.len() as f32 * row_h).max(CHART_H);
+    start_svg_card_sized(&mut buf, "Disk Usage (latest)", card_h);
+
     let bar_x = 140.0;
     let bar_max_w = CHART_W - bar_x - 70.0;
-    let row_h = (PLOT_H / mounts.len().max(1) as f32).clamp(22.0, 34.0);
 
-    for (i, &(mount, pct)) in mounts.iter().take(5).enumerate() {
+    for (i, &(mount, pct)) in mounts.iter().enumerate() {
         let y = PAD_TOP + 6.0 + i as f32 * row_h;
         let clamped = pct.clamp(0.0, 100.0);
         let fill_w = (clamped / 100.0) * bar_max_w;
@@ -452,12 +464,14 @@ mod tests {
     fn test_svg_splits_none_gaps_and_escapes_xml() {
         let pts = vec![
             pt(1000, 10.0, Some(45.0), true),
-            pt(1010, 10.0, None, true),
-            pt(1020, 10.0, Some(47.0), true),
+            pt(1010, 10.0, Some(46.0), true),
+            pt(1020, 10.0, None, true),
+            pt(1030, 10.0, Some(47.0), true),
         ];
         let svg = render_raw_line_chart("Temp <SoC>", "°C", "--peach", &pts, |p| p.temp_c, None);
         assert!(svg.contains("Temp &lt;SoC&gt;"));
-        assert_eq!(svg.matches("<polyline").count(), 2);
+        assert_eq!(svg.matches("<polyline").count(), 1);
+        assert_eq!(svg.matches("<circle").count(), 1);
     }
 
     #[test]
@@ -507,5 +521,18 @@ mod tests {
         let disk_svg = render_disk_bars(&[("/", 62.5), ("/home", 81.0)]);
         assert!(disk_svg.contains("62.5%"));
         assert!(disk_svg.contains("81.0%"));
+
+        let many_mounts = [
+            ("/", 10.0),
+            ("/home", 20.0),
+            ("/var", 30.0),
+            ("/tmp", 40.0),
+            ("/mnt/a", 50.0),
+            ("/mnt/b", 60.0),
+            ("/mnt/c", 70.0),
+        ];
+        let tall_disk_svg = render_disk_bars(&many_mounts);
+        assert!(tall_disk_svg.contains("/mnt/c"));
+        assert!(tall_disk_svg.contains("70.0%"));
     }
 }
