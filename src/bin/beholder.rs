@@ -1,48 +1,8 @@
+use beholder_brother::{ArchiveType, Config, return_today, rollout, savelog, sense};
 use lexopt::prelude::*;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-use time::{Date, OffsetDateTime};
-
-mod rollout;
-mod savelog;
-mod sense;
-
-struct Config {
-    interval_ms: u64,
-    log_dir: PathBuf,
-    retain_days: u64,
-    history_days: u64,
-    archive_dir: PathBuf,
-    archive_type: ArchiveType,
-    network_target: SocketAddr,
-    mounts: Vec<PathBuf>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            interval_ms: 10000,
-            log_dir: PathBuf::from("/var/log/beholder"),
-            retain_days: 7,
-            history_days: 180,
-            archive_dir: PathBuf::from("/var/log/beholder/archive"),
-            archive_type: ArchiveType::Gzip,
-            network_target: SocketAddr::from(([1, 1, 1, 1], 53)),
-            mounts: vec![PathBuf::from("/")],
-        }
-    }
-}
-
-#[derive(Default)]
-pub enum ArchiveType {
-    Plain,
-    #[default]
-    Gzip,
-    None,
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let running = Arc::new(AtomicBool::new(true));
@@ -183,21 +143,3 @@ fn parse_args() -> Result<Option<Config>, Box<dyn std::error::Error>> {
     }
     Ok(Some(cfg))
 }
-
-pub fn return_today() -> Result<Date, Box<dyn std::error::Error>> {
-    Ok(OffsetDateTime::from_unix_timestamp(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64,
-    )?
-    .date())
-}
-
-#[cfg(debug_assertions)]
-fn print_debug(msg: &str) {
-    eprintln!("[debug] {msg}");
-}
-
-#[cfg(not(debug_assertions))]
-fn print_debug(_msg: &str) {}

@@ -2,6 +2,15 @@
 name = "beholder-brother"
 version = "0.0.1-alpha"
 edition = "2024"
+default-run = "beholder"
+
+[[bin]]
+name = "beholder"
+path = "src/bin/beholder.rs"
+
+[[bin]]
+name = "brother"
+path = "src/bin/brother.rs"
 
 [dependencies]
 lexopt = "0.3.2"
