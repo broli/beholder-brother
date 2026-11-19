@@ -145,6 +145,16 @@ pub fn render_raw_line_chart(
     let (y_min, y_max) = compute_bounds(points.iter().filter_map(|(_, v, _)| *v), fixed_bounds);
     draw_y_grid(&mut buf, y_min, y_max, unit);
 
+    let flush_segment = |buf: &mut String, segment: &mut String| {
+        if !segment.is_empty() {
+            let _ = writeln!(
+                buf,
+                r#"  <polyline fill="none" stroke="var({color_var})" stroke-width="2" stroke-linejoin="round" points="{segment}"/>"#
+            );
+            segment.clear();
+        }
+    };
+
     // Draw contiguous polyline segments (splitting on None gaps such as missing temp_c)
     let mut segment = String::new();
     for (i, &(_, val_opt, _)) in points.iter().enumerate() {
@@ -155,20 +165,11 @@ pub fn render_raw_line_chart(
                 segment.push(' ');
             }
             let _ = write!(segment, "{x:.1},{y:.1}");
-        } else if !segment.is_empty() {
-            let _ = writeln!(
-                buf,
-                r#"  <polyline fill="none" stroke="var({color_var})" stroke-width="2" stroke-linejoin="round" points="{segment}"/>"#
-            );
-            segment.clear();
+        } else {
+            flush_segment(&mut buf, &mut segment);
         }
     }
-    if !segment.is_empty() {
-        let _ = writeln!(
-            buf,
-            r#"  <polyline fill="none" stroke="var({color_var})" stroke-width="2" stroke-linejoin="round" points="{segment}"/>"#
-        );
-    }
+    flush_segment(&mut buf, &mut segment);
 
     // Highlight single points or network outage ticks at the bottom axis
     let base_y = PAD_TOP + plot_h();

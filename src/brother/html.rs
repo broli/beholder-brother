@@ -15,6 +15,7 @@ pub struct LiveSummary {
     pub temp_24h_svg: String,
 }
 
+#[derive(Clone)]
 pub struct RetainedDayView {
     pub date_label: String,
     pub samples: usize,
@@ -24,6 +25,7 @@ pub struct RetainedDayView {
     pub temp_svg: String,
 }
 
+#[derive(Clone)]
 pub struct HistoryView {
     pub days_count: usize,
     pub cpu_svg: String,

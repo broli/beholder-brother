@@ -90,26 +90,14 @@ impl DashboardCache {
         if let Some(cached) = &self.history
             && cached.stamp == stamp
         {
-            return Ok(HistoryView {
-                days_count: cached.view.days_count,
-                cpu_svg: cached.view.cpu_svg.clone(),
-                mem_svg: cached.view.mem_svg.clone(),
-                temp_svg: cached.view.temp_svg.clone(),
-                net_svg: cached.view.net_svg.clone(),
-            });
+            return Ok(cached.view.clone());
         }
 
         let days = parse_history(path)?;
         let view = render_history_view(&days);
         self.history = Some(CachedHistory {
             stamp,
-            view: HistoryView {
-                days_count: view.days_count,
-                cpu_svg: view.cpu_svg.clone(),
-                mem_svg: view.mem_svg.clone(),
-                temp_svg: view.temp_svg.clone(),
-                net_svg: view.net_svg.clone(),
-            },
+            view: view.clone(),
         });
         Ok(view)
     }
@@ -123,7 +111,7 @@ impl DashboardCache {
         if let Some(cached) = self.retained_days.get(&date)
             && cached.stamp == stamp
         {
-            return Ok(clone_day_view(&cached.view));
+            return Ok(cached.view.clone());
         }
 
         let raw = parse_raw_log(path)?;
@@ -144,21 +132,10 @@ impl DashboardCache {
             date,
             CachedDay {
                 stamp,
-                view: clone_day_view(&view),
+                view: view.clone(),
             },
         );
         Ok(view)
-    }
-}
-
-fn clone_day_view(v: &RetainedDayView) -> RetainedDayView {
-    RetainedDayView {
-        date_label: v.date_label.clone(),
-        samples: v.samples,
-        outages: v.outages,
-        cpu_svg: v.cpu_svg.clone(),
-        mem_svg: v.mem_svg.clone(),
-        temp_svg: v.temp_svg.clone(),
     }
 }
 
