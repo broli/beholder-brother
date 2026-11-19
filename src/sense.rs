@@ -21,6 +21,7 @@ pub struct DiskSample {
     pub used_pct: f32,
 }
 
+#[derive(Default)]
 pub struct PreviousCpuTick {
     pub idle: u64,
     pub total: u64,
