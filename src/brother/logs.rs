@@ -323,36 +323,8 @@ pub fn downsample_raw(points: &[RawPoint], max_points: usize) -> Vec<RawPoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::test_support::TestTempDir;
     use time::macros::date;
-
-    struct TestTempDir(PathBuf);
-
-    impl TestTempDir {
-        fn new(label: &str) -> io::Result<Self> {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let dir = std::env::temp_dir().join(format!(
-                "brother_logs_test_{label}_{}_{}",
-                std::process::id(),
-                nanos
-            ));
-            fs::create_dir_all(&dir)?;
-            Ok(Self(dir))
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TestTempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[test]
     fn test_scan_log_dir_orders_dates_and_handles_missing_dir() -> io::Result<()> {

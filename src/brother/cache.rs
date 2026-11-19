@@ -32,10 +32,6 @@ pub struct DashboardCache {
 }
 
 impl DashboardCache {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Builds the full 3-tab HTML dashboard, reusing cached SVGs for immutable past days
     /// and unchanged `history.log` unless `force` is true.
     pub fn build_dashboard(
@@ -257,38 +253,9 @@ fn build_live_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestTempDir;
     use std::fs;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use time::macros::date;
-
-    struct TestTempDir(PathBuf);
-
-    impl TestTempDir {
-        fn new(label: &str) -> io::Result<Self> {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let dir = std::env::temp_dir().join(format!(
-                "brother_cache_test_{label}_{}_{}",
-                std::process::id(),
-                nanos
-            ));
-            fs::create_dir_all(&dir)?;
-            Ok(Self(dir))
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TestTempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[test]
     fn test_cache_builds_evicts_and_respects_force() -> io::Result<()> {
@@ -298,7 +265,7 @@ mod tests {
         fs::write(&past_raw, "1000 10.0 40.0 45.0 1 10000\n")?;
         fs::write(&today_raw, "2000 25.0 50.0 48.0 1 10000\n")?;
 
-        let mut cache = DashboardCache::new();
+        let mut cache = DashboardCache::default();
         let html = cache.build_dashboard(dir.path(), date!(2026 - 11 - 19), false, 1.0)?;
         assert!(html.contains("Retained Raw (1d)"));
         assert!(html.contains("25.0%"));

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -5,9 +7,12 @@ use time::macros::format_description;
 use time::{Date, OffsetDateTime};
 
 pub mod brother;
+pub mod error;
 pub mod rollout;
 pub mod savelog;
 pub mod sense;
+
+pub use error::{Error, Result};
 
 pub struct Config {
     pub interval_ms: u64,
@@ -18,6 +23,7 @@ pub struct Config {
     pub archive_type: ArchiveType,
     pub network_target: SocketAddr,
     pub mounts: Vec<PathBuf>,
+    pub flush_each_sample: bool,
 }
 
 impl Default for Config {
@@ -31,6 +37,7 @@ impl Default for Config {
             archive_type: ArchiveType::Gzip,
             network_target: SocketAddr::from(([1, 1, 1, 1], 53)),
             mounts: vec![PathBuf::from("/")],
+            flush_each_sample: false,
         }
     }
 }
@@ -43,7 +50,7 @@ pub enum ArchiveType {
     None,
 }
 
-pub fn return_today() -> Result<Date, Box<dyn std::error::Error>> {
+pub fn return_today() -> Result<Date> {
     Ok(OffsetDateTime::from_unix_timestamp(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -73,3 +80,43 @@ pub fn print_debug(msg: &str) {
 
 #[cfg(not(debug_assertions))]
 pub fn print_debug(_msg: &str) {}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::fs;
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) struct TestTempDir {
+        path: PathBuf,
+    }
+
+    impl TestTempDir {
+        pub(crate) fn new(prefix: &str) -> io::Result<Self> {
+            let base = std::env::temp_dir();
+            let pid = std::process::id();
+            loop {
+                let seq = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let candidate = base.join(format!("beholder_{prefix}_{pid}_{seq}"));
+                match fs::create_dir(&candidate) {
+                    Ok(()) => return Ok(Self { path: candidate }),
+                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestTempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}

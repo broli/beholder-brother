@@ -1,71 +1,177 @@
+use crate::Result;
 use crate::sense::{DiskSample, Sample};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::Path;
+use std::fmt::Write as _;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::macros::format_description;
 
-pub fn append_sample(
-    log_dir: &Path,
-    sample: &Sample,
-    interval_ms: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = open_daily_log(
-        log_dir,
-        "raw",
-        sample.timestamp,
-        "# timestamp cpu_pct mem_pct temp_c net_ok interval_ms",
-    )?;
+const BUFFER_BYTES: usize = 4096;
+const RAW_HEADER: &str = "# timestamp cpu_pct mem_pct temp_c net_ok interval_ms";
+const DISKS_HEADER: &str = "# timestamp mount used_pct";
 
-    write!(
-        file,
-        "{} {:.2} {:.2} ",
-        sample.timestamp, sample.cpu_pct, sample.mem_pct
-    )?;
-    match sample.temp_c {
-        Some(t) => write!(file, "{:.1}", t)?,
-        None => write!(file, "-")?,
-    }
-    writeln!(file, " {} {}", u8::from(sample.net_ok), interval_ms)?;
-
-    Ok(())
+enum LogTarget {
+    Buffered(BufWriter<File>),
+    Immediate(File),
 }
 
-pub fn append_disks(
-    log_dir: &Path,
-    timestamp: u64,
-    disks: &[DiskSample],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = open_daily_log(log_dir, "disks", timestamp, "# timestamp mount used_pct")?;
-
-    for disk in disks {
-        writeln!(
-            file,
-            "{} {} {:.2}",
-            timestamp,
-            disk.mount.display(),
-            disk.used_pct
-        )?;
+impl LogTarget {
+    fn write_line(&mut self, line: &str) -> io::Result<()> {
+        match self {
+            Self::Buffered(writer) => writer.write_all(line.as_bytes()),
+            Self::Immediate(file) => {
+                file.write_all(line.as_bytes())?;
+                file.flush()
+            }
+        }
     }
 
-    Ok(())
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Buffered(writer) => writer.flush(),
+            Self::Immediate(file) => file.flush(),
+        }
+    }
 }
 
-fn sample_timestamp(timestamp: u64) -> Result<String, Box<dyn std::error::Error>> {
+struct LogStream {
+    prefix: &'static str,
+    header: &'static str,
+    active_date: Option<String>,
+    target: Option<LogTarget>,
+}
+
+impl LogStream {
+    const fn new(prefix: &'static str, header: &'static str) -> Self {
+        Self {
+            prefix,
+            header,
+            active_date: None,
+            target: None,
+        }
+    }
+
+    fn ensure_date(
+        &mut self,
+        log_dir: &Path,
+        date_str: &str,
+        flush_each_sample: bool,
+    ) -> Result<&mut LogTarget> {
+        if self.active_date.as_deref() == Some(date_str) && self.target.is_some() {
+            return self
+                .target
+                .as_mut()
+                .ok_or_else(|| crate::Error::Parse("missing log target".into()));
+        }
+        if let Some(prev) = self.target.as_mut() {
+            prev.flush()?;
+        }
+        let file = open_daily_log(log_dir, self.prefix, date_str, self.header)?;
+        let target = if flush_each_sample {
+            LogTarget::Immediate(file)
+        } else {
+            LogTarget::Buffered(BufWriter::with_capacity(BUFFER_BYTES, file))
+        };
+        self.active_date = Some(date_str.to_string());
+        Ok(self.target.insert(target))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(target) = self.target.as_mut() {
+            target.flush()?;
+        }
+        Ok(())
+    }
+}
+
+/// Keeps daily `raw` and `disks` log files open across ticks, rotating on date change.
+pub struct DailyLogs {
+    log_dir: PathBuf,
+    flush_each_sample: bool,
+    raw: LogStream,
+    disks: LogStream,
+    buf: String,
+}
+
+impl DailyLogs {
+    pub fn new(log_dir: PathBuf, flush_each_sample: bool) -> Self {
+        Self {
+            log_dir,
+            flush_each_sample,
+            raw: LogStream::new("raw", RAW_HEADER),
+            disks: LogStream::new("disks", DISKS_HEADER),
+            buf: String::with_capacity(128),
+        }
+    }
+
+    pub fn append_sample(&mut self, sample: &Sample, interval_ms: u64) -> Result<()> {
+        let date_str = format_date(sample.timestamp)?;
+        self.buf.clear();
+        let _ = write!(
+            self.buf,
+            "{} {:.2} {:.2} ",
+            sample.timestamp, sample.cpu_pct, sample.mem_pct
+        );
+        match sample.temp_c {
+            Some(t) => {
+                let _ = write!(self.buf, "{t:.1}");
+            }
+            None => self.buf.push('-'),
+        }
+        let _ = writeln!(self.buf, " {} {}", u8::from(sample.net_ok), interval_ms);
+
+        let target = self
+            .raw
+            .ensure_date(&self.log_dir, &date_str, self.flush_each_sample)?;
+        target.write_line(&self.buf)?;
+        Ok(())
+    }
+
+    pub fn append_disks(&mut self, timestamp: u64, disks: &[DiskSample]) -> Result<()> {
+        let date_str = format_date(timestamp)?;
+        self.buf.clear();
+        for disk in disks {
+            let _ = writeln!(
+                self.buf,
+                "{timestamp} {} {:.2}",
+                disk.mount.display(),
+                disk.used_pct
+            );
+        }
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+
+        let target = self
+            .disks
+            .ensure_date(&self.log_dir, &date_str, self.flush_each_sample)?;
+        target.write_line(&self.buf)?;
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        self.raw.flush()?;
+        self.disks.flush()?;
+        Ok(())
+    }
+}
+
+impl Drop for DailyLogs {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+fn format_date(timestamp: u64) -> Result<String> {
     let dt = OffsetDateTime::from_unix_timestamp(timestamp as i64)?;
     let format = format_description!("[year]-[month]-[day]");
     Ok(dt.format(&format)?)
 }
 
-fn open_daily_log(
-    log_dir: &Path,
-    prefix: &str,
-    timestamp: u64,
-    header: &str,
-) -> Result<std::fs::File, Box<dyn std::error::Error>> {
+fn open_daily_log(log_dir: &Path, prefix: &str, date_str: &str, header: &str) -> Result<File> {
     fs::create_dir_all(log_dir)?;
-    let date_str = sample_timestamp(timestamp)?;
-    let file_path = log_dir.join(format!("{}-{}.log", prefix, date_str));
+    let file_path = log_dir.join(format!("{prefix}-{date_str}.log"));
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -73,8 +179,74 @@ fn open_daily_log(
         .open(&file_path)?;
 
     if file.metadata()?.len() == 0 {
-        writeln!(file, "{}", header)?;
+        writeln!(file, "{header}")?;
     }
 
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestTempDir;
+
+    fn sample(ts: u64, temp_c: Option<f32>) -> Sample {
+        Sample {
+            timestamp: ts,
+            cpu_pct: 12.5,
+            mem_pct: 45.0,
+            temp_c,
+            net_ok: true,
+        }
+    }
+
+    #[test]
+    fn test_daily_logs_buffered_flush_and_midnight_rotation() -> Result<()> {
+        let dir = TestTempDir::new("savelog_buf")?;
+        let day1_ts = 1_794_355_200; // 2026-11-11 00:00:00 UTC
+        let day2_ts = day1_ts + 86_400; // 2026-11-12 00:00:00 UTC
+
+        {
+            let mut logs = DailyLogs::new(dir.path().to_path_buf(), false);
+            logs.append_sample(&sample(day1_ts, Some(48.2)), 10_000)?;
+            logs.append_sample(&sample(day1_ts + 10, None), 10_000)?;
+            // Rotating to day 2 flushes day 1 cleanly.
+            logs.append_sample(&sample(day2_ts, Some(49.0)), 10_000)?;
+            logs.append_disks(
+                day2_ts,
+                &[DiskSample {
+                    mount: PathBuf::from("/"),
+                    used_pct: 61.25,
+                }],
+            )?;
+        } // Drop flushes day 2 raw + disks.
+
+        let day1_raw = fs::read_to_string(dir.path().join("raw-2026-11-11.log"))?;
+        assert_eq!(day1_raw.lines().count(), 3);
+        assert!(day1_raw.contains("48.2 1 10000"));
+        assert!(day1_raw.contains(" - 1 10000"));
+
+        let day2_raw = fs::read_to_string(dir.path().join("raw-2026-11-12.log"))?;
+        assert_eq!(day2_raw.lines().count(), 2);
+
+        let day2_disks = fs::read_to_string(dir.path().join("disks-2026-11-12.log"))?;
+        assert_eq!(day2_disks.lines().count(), 2);
+        assert!(day2_disks.contains("/ 61.25"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_daily_logs_immediate_flush_mode() -> Result<()> {
+        let dir = TestTempDir::new("savelog_imm")?;
+        let mut logs = DailyLogs::new(dir.path().to_path_buf(), true);
+        logs.append_sample(&sample(1_794_355_200, Some(42.0)), 5_000)?;
+
+        // Visible on disk immediately without dropping or calling flush().
+        let contents = fs::read_to_string(dir.path().join("raw-2026-11-11.log"))?;
+        assert_eq!(contents.lines().count(), 2);
+        assert!(contents.contains("42.0 1 5000"));
+
+        Ok(())
+    }
 }

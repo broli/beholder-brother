@@ -1,4 +1,5 @@
 use crate::brother::svg::escape_xml;
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 pub struct LiveSummary {
@@ -158,7 +159,7 @@ details.day-card[open] summary { margin-bottom: 0.85rem; }
 .empty { color: var(--subtext); font-style: italic; }
 "#;
 
-const JS: &str = r#"
+const JS: &str = r"
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -175,12 +176,12 @@ document.querySelectorAll('.win-btn').forEach(btn => {
     document.getElementById(btn.dataset.win).classList.add('active');
   });
 });
-"#;
+";
 
-fn fmt_opt(val: Option<f32>, suffix: &str) -> String {
+fn fmt_opt(val: Option<f32>, suffix: &str) -> Cow<'static, str> {
     match val {
-        Some(v) => format!("{v:.1}{suffix}"),
-        None => "-".to_string(),
+        Some(v) => Cow::Owned(format!("{v:.1}{suffix}")),
+        None => Cow::Borrowed("-"),
     }
 }
 

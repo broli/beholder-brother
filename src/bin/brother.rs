@@ -1,5 +1,7 @@
+#![forbid(unsafe_code)]
+
 use beholder_brother::brother::cache::DashboardCache;
-use beholder_brother::return_today;
+use beholder_brother::{Error, Result, return_today};
 use lexopt::prelude::*;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -26,7 +28,7 @@ impl Default for BrotherConfig {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let Some(cfg) = parse_args()? else {
         return Ok(());
     };
@@ -39,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     let server = Server::http(cfg.bind_addr)
-        .map_err(|e| format!("failed to bind {}: {e}", cfg.bind_addr))?;
+        .map_err(|e| Error::Server(format!("failed to bind {}: {e}", cfg.bind_addr)))?;
     println!(
         "brother listening on http://{} (log-dir: {}, force: {})",
         cfg.bind_addr,
@@ -47,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.force
     );
 
-    let mut cache = DashboardCache::new();
+    let mut cache = DashboardCache::default();
     // Warm the cache on startup so the first browser load is instant.
     if !cfg.force
         && let Ok(today) = return_today()
@@ -63,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(None) => {}
             Err(err) => {
-                return Err(format!("HTTP accept error: {err}").into());
+                return Err(Error::Server(format!("HTTP accept error: {err}")));
             }
         }
     }
@@ -136,7 +138,7 @@ fn handle_request(
 
 fn print_usage() {
     println!(
-        r#"Usage: brother [OPTIONS]
+        r"Usage: brother [OPTIONS]
 
 Options:
     -h, --help              Print this help message
@@ -145,11 +147,11 @@ Options:
     -b, --bind <ADDR>       HTTP listen address (default: 127.0.0.1:6060)
     -f, --force             Bypass cache and reload all log files from disk on each request
     -s, --scale <FACTOR>    UI/chart scale factor, e.g. 1.25 or 1.5 (range: 0.5..=4.0, default: 1.0)
-"#
+"
     );
 }
 
-fn parse_args() -> Result<Option<BrotherConfig>, Box<dyn std::error::Error>> {
+fn parse_args() -> Result<Option<BrotherConfig>> {
     let mut parser = lexopt::Parser::from_env();
     let mut cfg = BrotherConfig::default();
 
@@ -175,7 +177,9 @@ fn parse_args() -> Result<Option<BrotherConfig>, Box<dyn std::error::Error>> {
             Short('s') | Long("scale") => {
                 let scale: f32 = parser.value()?.parse()?;
                 if !scale.is_finite() || !(0.5..=4.0).contains(&scale) {
-                    return Err("scale must be between 0.5 and 4.0".into());
+                    return Err(Error::InvalidArg(
+                        "scale must be between 0.5 and 4.0".to_string(),
+                    ));
                 }
                 cfg.scale = scale;
             }
@@ -191,18 +195,30 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
-    #[test]
-    fn test_http_routes_root_health_and_404() -> Result<(), Box<dyn std::error::Error>> {
-        let server = Server::http("127.0.0.1:0").map_err(|e| format!("{e}"))?;
-        let addr = server.server_addr().to_ip().ok_or("missing bound ip")?;
+    struct TestDirGuard(std::path::PathBuf);
 
-        let log_dir =
-            std::env::temp_dir().join(format!("brother_http_test_{}", std::process::id()));
-        std::fs::create_dir_all(&log_dir)?;
-        let log_dir_clone = log_dir.clone();
+    impl Drop for TestDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_http_routes_root_health_and_404() -> Result<()> {
+        let server = Server::http("127.0.0.1:0").map_err(|e| Error::Server(e.to_string()))?;
+        let addr = server
+            .server_addr()
+            .to_ip()
+            .ok_or_else(|| Error::Server("missing bound ip".to_string()))?;
+
+        let log_dir = TestDirGuard(
+            std::env::temp_dir().join(format!("brother_http_test_{}", std::process::id())),
+        );
+        std::fs::create_dir_all(&log_dir.0)?;
+        let log_dir_clone = log_dir.0.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut cache = DashboardCache::new();
+            let mut cache = DashboardCache::default();
             for _ in 0..3 {
                 if let Ok(Some(req)) = server.recv_timeout(Duration::from_secs(2)) {
                     handle_request(req, &mut cache, &log_dir_clone, false, 1.0);
@@ -233,7 +249,6 @@ mod tests {
         assert!(missing_resp.starts_with("HTTP/1.1 404"));
 
         let _ = handle.join();
-        let _ = std::fs::remove_dir_all(&log_dir);
         Ok(())
     }
 }
