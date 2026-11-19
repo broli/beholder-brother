@@ -26,14 +26,14 @@ Telemetry is bifurcated into two independent storage tiers:
          ▼
 ┌──────────────────────────────┐
 │  Tier 1: High-Res Daily Logs │  `raw-YYYY-MM-DD.log`
-│  (8,640 samples / ~300 KB)   │  Retained for N days (default: 2)
+│  (8,640 samples / ~300 KB)   │  Retained for N days (default: 7)
 └──────────────┬───────────────┘
                │
-               │ Midnight Rollup Pass (`beholder --rollup`)
+               │ Midnight Rollup Pass
                ▼
 ┌──────────────────────────────┐
 │  Tier 2: Historical Summary  │  `history.log`
-│  (1 line per metric per day) │  Retained for M days (default: 90)
+│  (1 line per metric per day) │  Retained for M days (default: 180)
 └──────────────────────────────┘
 ```
 
@@ -69,22 +69,23 @@ Telemetry is bifurcated into two independent storage tiers:
 
 ---
 
-### Decision 4: Storage Footprint Guarantees
+### Decision 4: Storage Footprint
 
 Under default settings (`--retain-days 7 --history-days 180 --archive gzip`):
 - Active raw logs: $7 \times 300\text{ KB} \approx 2.1\text{ MB}$.
 - Active disk logs: $7 \times 4\text{ KB} \approx 28\text{ KB}$.
 - Historical summary: $180 \times 160\text{ bytes} \approx 28.8\text{ KB}$.
-- Archived logs (`archive/*.gz`): ~35 KB per archived day (can be disabled with `--archive none` for a strict **$< 2.5\text{ MB}$ permanently bounded** footprint).
+- Archived logs (`archive/*.gz`): grows by ~35 KB per retired day (~12.8 MB/year) because expired archives are not auto-pruned.
+- **Strictly bounded mode (`--archive none`)**: Unlinks expired logs instead of archiving, keeping total disk usage **$< 2.5\text{ MB}$ permanently bounded**.
 
 ---
 
 ## 3. Consequences
 
 - **Positive**:
-  - The storage budget is mathematically bounded; the daemon can run for years without filling disks.
+  - Active `raw-*.log` and `history.log` are strictly bounded; with `--archive none`, the daemon can run for years without filling disks.
   - Zero-cost cleanup via `unlink()`.
-  - Visualizer loads instantly because historical summaries never exceed ~15–30 KB.
+  - Visualizer loads instantly because historical summaries never exceed ~30 KB.
 - **Trade-offs**:
-  - High-resolution (10s) data older than `retain_days` is permanently reduced to daily aggregates (or archived to `.gz` if enabled).
+  - High-resolution (10s) data older than `retain_days` is permanently reduced to daily aggregates (or archived to `archive/*.gz` if `--archive gzip` is enabled, which grows ~12.8 MB/year unless pruned externally).
 

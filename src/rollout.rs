@@ -438,7 +438,9 @@ fn gzip_file(src: &Path, dst_gz: &Path) -> io::Result<()> {
     let out_file = File::create(&tmp_gz)?;
     let mut encoder = GzEncoder::new(BufWriter::new(out_file), Compression::default());
 
-    if let Err(err) = io::copy(&mut input, &mut encoder).and_then(|_| encoder.finish().map(|_| ()))
+    if let Err(err) = io::copy(&mut input, &mut encoder)
+        .and_then(|_| encoder.finish())
+        .and_then(|mut writer| writer.flush())
     {
         let _ = fs::remove_file(&tmp_gz);
         return Err(err);

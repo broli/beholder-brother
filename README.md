@@ -58,7 +58,7 @@ Options:
     -s, --scale <FACTOR>    Page zoom factor in 0.5..=4.0 (default: 1.0)
 ```
 
-For remote machines, sync `/var/log/beholder` locally via `rsync`/`scp` or bind `brother` to localhost and tunnel over SSH/WireGuard.
+For remote machines, sync `/var/log/beholder` locally via `rsync`/`scp`, tunnel `127.0.0.1:6060` over SSH (`ssh -L 6060:127.0.0.1:6060`), or bind `brother` to the host's WireGuard IP (`--bind <wg-ip>:6060`).
 
 ## Notes & Known Limitations
 
