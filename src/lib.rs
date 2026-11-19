@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use time::macros::format_description;
 use time::{Date, OffsetDateTime};
 
 pub mod brother;
@@ -50,6 +51,19 @@ pub fn return_today() -> Result<Date, Box<dyn std::error::Error>> {
             .as_secs() as i64,
     )?
     .date())
+}
+
+pub(crate) fn parse_date_str(s: &str) -> Option<Date> {
+    let format = format_description!("[year]-[month]-[day]");
+    Date::parse(s, &format).ok()
+}
+
+pub(crate) fn parse_prefixed_log_date(filename: &str, prefix: &str) -> Option<Date> {
+    let date_part = filename
+        .strip_prefix(prefix)?
+        .strip_prefix('-')?
+        .strip_suffix(".log")?;
+    parse_date_str(date_part)
 }
 
 #[cfg(debug_assertions)]

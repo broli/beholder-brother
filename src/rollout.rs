@@ -5,9 +5,8 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use time::Date;
-use time::macros::format_description;
 
-use crate::{ArchiveType, Config};
+use crate::{ArchiveType, Config, parse_date_str};
 
 const HISTORY_FILE: &str = "history.log";
 const HISTORY_HEADER: &str = "# date metric min avg max p95";
@@ -99,17 +98,8 @@ pub fn rollup_and_retire(config: &Config, today: &Date) -> Result<(), Box<dyn st
     Ok(())
 }
 
-fn parse_date_str(s: &str) -> Option<Date> {
-    let time_format = format_description!("[year]-[month]-[day]");
-    Date::parse(s, &time_format).ok()
-}
-
 fn parse_log_date(filename: &str, kind: LogKind) -> Option<Date> {
-    let date_part = filename
-        .strip_prefix(kind.as_str())? //you shall not format me damm rust
-        .strip_prefix('-')?
-        .strip_suffix(".log")?;
-    parse_date_str(date_part)
+    crate::parse_prefixed_log_date(filename, kind.as_str())
 }
 
 fn collect_past_logs(log_dir: &Path, today: Date) -> io::Result<Vec<DatedLog>> {

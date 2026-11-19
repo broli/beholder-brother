@@ -1,4 +1,4 @@
-use crate::brother::logs::{HistoryDay, MetricStats};
+use crate::brother::logs::{HistoryDay, MetricStats, RawPoint};
 use std::fmt::Write as _;
 
 const CHART_W: f32 = 800.0;
@@ -8,14 +8,8 @@ const PAD_LEFT: f32 = 52.0;
 const PAD_RIGHT: f32 = 18.0;
 const PAD_TOP: f32 = 34.0;
 const PAD_BOTTOM: f32 = 28.0;
-
-fn plot_w() -> f32 {
-    CHART_W - PAD_LEFT - PAD_RIGHT
-}
-
-fn plot_h() -> f32 {
-    CHART_H - PAD_TOP - PAD_BOTTOM
-}
+const PLOT_W: f32 = CHART_W - PAD_LEFT - PAD_RIGHT;
+const PLOT_H: f32 = CHART_H - PAD_TOP - PAD_BOTTOM;
 
 /// Escapes XML/HTML special characters so dynamic labels (e.g. mount paths) are XSS-safe.
 pub fn escape_xml(input: &str) -> String {
@@ -35,16 +29,16 @@ pub fn escape_xml(input: &str) -> String {
 
 fn map_x(idx: usize, len: usize) -> f32 {
     if len <= 1 {
-        PAD_LEFT + plot_w() / 2.0
+        PAD_LEFT + PLOT_W / 2.0
     } else {
-        PAD_LEFT + (idx as f32 / (len - 1) as f32) * plot_w()
+        PAD_LEFT + (idx as f32 / (len - 1) as f32) * PLOT_W
     }
 }
 
 fn map_y(val: f32, y_min: f32, y_max: f32) -> f32 {
     let span = (y_max - y_min).max(0.001);
     let norm = ((val - y_min) / span).clamp(0.0, 1.0);
-    PAD_TOP + (1.0 - norm) * plot_h()
+    PAD_TOP + (1.0 - norm) * PLOT_H
 }
 
 fn compute_bounds(values: impl Iterator<Item = f32>, fixed: Option<(f32, f32)>) -> (f32, f32) {
@@ -125,24 +119,25 @@ fn draw_empty_state(buf: &mut String, message: &str) {
     buf.push_str("</svg>\n");
 }
 
-/// Renders an intraday line chart from `(timestamp, Option<value>, net_ok)` tuples.
+/// Renders an intraday line chart directly from `RawPoint` slices.
 pub fn render_raw_line_chart(
     title: &str,
     unit: &str,
     color_var: &str,
-    points: &[(u64, Option<f32>, bool)],
+    points: &[RawPoint],
+    extract: fn(&RawPoint) -> Option<f32>,
     fixed_bounds: Option<(f32, f32)>,
 ) -> String {
     let mut buf = String::with_capacity(2048);
     start_svg_card(&mut buf, title);
 
-    let has_values = points.iter().any(|(_, v, _)| v.is_some());
+    let has_values = points.iter().any(|p| extract(p).is_some());
     if points.is_empty() || !has_values {
         draw_empty_state(&mut buf, "No samples available");
         return buf;
     }
 
-    let (y_min, y_max) = compute_bounds(points.iter().filter_map(|(_, v, _)| *v), fixed_bounds);
+    let (y_min, y_max) = compute_bounds(points.iter().filter_map(extract), fixed_bounds);
     draw_y_grid(&mut buf, y_min, y_max, unit);
 
     let flush_segment = |buf: &mut String, segment: &mut String| {
@@ -157,8 +152,8 @@ pub fn render_raw_line_chart(
 
     // Draw contiguous polyline segments (splitting on None gaps such as missing temp_c)
     let mut segment = String::new();
-    for (i, &(_, val_opt, _)) in points.iter().enumerate() {
-        if let Some(val) = val_opt {
+    for (i, p) in points.iter().enumerate() {
+        if let Some(val) = extract(p) {
             let x = map_x(i, points.len());
             let y = map_y(val, y_min, y_max);
             if !segment.is_empty() {
@@ -172,18 +167,19 @@ pub fn render_raw_line_chart(
     flush_segment(&mut buf, &mut segment);
 
     // Highlight single points or network outage ticks at the bottom axis
-    let base_y = PAD_TOP + plot_h();
-    for (i, &(ts, val_opt, net_ok)) in points.iter().enumerate() {
+    let base_y = PAD_TOP + PLOT_H;
+    for (i, p) in points.iter().enumerate() {
         let x = map_x(i, points.len());
-        if !net_ok {
+        if !p.net_ok {
             let _ = writeln!(
                 buf,
                 r#"  <line x1="{x:.1}" y1="{y1:.1}" x2="{x:.1}" y2="{base_y:.1}" stroke="var(--red)" stroke-width="2"><title>Network down @ {ts}</title></line>"#,
+                ts = p.timestamp,
                 y1 = base_y - 8.0
             );
         }
         if points.len() == 1
-            && let Some(val) = val_opt
+            && let Some(val) = extract(p)
         {
             let y = map_y(val, y_min, y_max);
             let _ = writeln!(
@@ -195,7 +191,7 @@ pub fn render_raw_line_chart(
     }
 
     // Latest value badge in top-right corner
-    if let Some((_, Some(last_v), _)) = points.iter().rev().find(|(_, v, _)| v.is_some()) {
+    if let Some(last_v) = points.iter().rev().find_map(extract) {
         let _ = writeln!(
             buf,
             r#"  <text x="{x:.1}" y="22" font-size="12" font-weight="600" text-anchor="end" fill="var({color_var})">latest: {last_v:.1}{unit}</text>"#,
@@ -331,9 +327,9 @@ pub fn render_net_down_chart(days: &[HistoryDay]) -> String {
         .fold(10.0_f32, f32::max);
     draw_y_grid(&mut buf, 0.0, max_sec, "s");
 
-    let slot_w = plot_w() / active.len() as f32;
+    let slot_w = PLOT_W / active.len() as f32;
     let bar_w = (slot_w * 0.65).clamp(3.0, 28.0);
-    let base_y = PAD_TOP + plot_h();
+    let base_y = PAD_TOP + PLOT_H;
 
     for (i, &(date, sec)) in active.iter().enumerate() {
         let cx = PAD_LEFT + (i as f32 + 0.5) * slot_w;
@@ -368,7 +364,7 @@ pub fn render_disk_bars(mounts: &[(&str, f32)]) -> String {
 
     let bar_x = 140.0;
     let bar_max_w = CHART_W - bar_x - 70.0;
-    let row_h = (plot_h() / mounts.len().max(1) as f32).clamp(22.0, 34.0);
+    let row_h = (PLOT_H / mounts.len().max(1) as f32).clamp(22.0, 34.0);
 
     for (i, &(mount, pct)) in mounts.iter().take(5).enumerate() {
         let y = PAD_TOP + 6.0 + i as f32 * row_h;
@@ -414,15 +410,39 @@ mod tests {
     use super::*;
     use time::macros::date;
 
+    fn pt(timestamp: u64, cpu_pct: f32, temp_c: Option<f32>, net_ok: bool) -> RawPoint {
+        RawPoint {
+            timestamp,
+            cpu_pct,
+            mem_pct: 50.0,
+            temp_c,
+            net_ok,
+            interval_ms: 10_000,
+        }
+    }
+
     #[test]
     fn test_svg_handles_empty_and_single_point_without_nan() {
-        let empty = render_raw_line_chart("CPU %", "%", "--blue", &[], Some((0.0, 100.0)));
+        let empty = render_raw_line_chart(
+            "CPU %",
+            "%",
+            "--blue",
+            &[],
+            |p| Some(p.cpu_pct),
+            Some((0.0, 100.0)),
+        );
         assert!(empty.contains("viewBox=\"0 0 805 225\""));
         assert!(empty.contains("No samples available"));
         assert!(!empty.contains("NaN"));
 
-        let single =
-            render_raw_line_chart("Temp", "°C", "--peach", &[(1000, Some(48.5), false)], None);
+        let single = render_raw_line_chart(
+            "Temp",
+            "°C",
+            "--peach",
+            &[pt(1000, 10.0, Some(48.5), false)],
+            |p| p.temp_c,
+            None,
+        );
         assert!(single.contains("<circle"));
         assert!(single.contains("Network down"));
         assert!(!single.contains("NaN"));
@@ -431,11 +451,11 @@ mod tests {
     #[test]
     fn test_svg_splits_none_gaps_and_escapes_xml() {
         let pts = vec![
-            (1000, Some(45.0), true),
-            (1010, None, true),
-            (1020, Some(47.0), true),
+            pt(1000, 10.0, Some(45.0), true),
+            pt(1010, 10.0, None, true),
+            pt(1020, 10.0, Some(47.0), true),
         ];
-        let svg = render_raw_line_chart("Temp <SoC>", "°C", "--peach", &pts, None);
+        let svg = render_raw_line_chart("Temp <SoC>", "°C", "--peach", &pts, |p| p.temp_c, None);
         assert!(svg.contains("Temp &lt;SoC&gt;"));
         assert_eq!(svg.matches("<polyline").count(), 2);
     }

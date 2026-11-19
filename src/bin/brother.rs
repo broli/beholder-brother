@@ -12,6 +12,7 @@ struct BrotherConfig {
     log_dir: PathBuf,
     bind_addr: SocketAddr,
     force: bool,
+    scale: f32,
 }
 
 impl Default for BrotherConfig {
@@ -20,6 +21,7 @@ impl Default for BrotherConfig {
             log_dir: PathBuf::from("/var/log/beholder"),
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 6060)),
             force: false,
+            scale: 1.0,
         }
     }
 }
@@ -47,8 +49,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cache = DashboardCache::new();
     // Warm the cache on startup so the first browser load is instant.
-    if let Ok(today) = return_today()
-        && let Err(err) = cache.build_dashboard(&cfg.log_dir, today, cfg.force)
+    if !cfg.force
+        && let Ok(today) = return_today()
+        && let Err(err) = cache.build_dashboard(&cfg.log_dir, today, false, cfg.scale)
     {
         eprintln!("Warning: initial dashboard build failed: {err}");
     }
@@ -56,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while running.load(Ordering::SeqCst) {
         match server.recv_timeout(Duration::from_millis(500)) {
             Ok(Some(request)) => {
-                handle_request(request, &mut cache, &cfg.log_dir, cfg.force);
+                handle_request(request, &mut cache, &cfg.log_dir, cfg.force, cfg.scale);
             }
             Ok(None) => {}
             Err(err) => {
@@ -70,7 +73,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn handle_request(request: Request, cache: &mut DashboardCache, log_dir: &Path, force: bool) {
+fn handle_request(
+    request: Request,
+    cache: &mut DashboardCache,
+    log_dir: &Path,
+    force: bool,
+    scale: f32,
+) {
     if request.method() != &Method::Get {
         let resp =
             Response::from_string("405 Method Not Allowed\n").with_status_code(StatusCode(405));
@@ -78,37 +87,37 @@ fn handle_request(request: Request, cache: &mut DashboardCache, log_dir: &Path, 
         return;
     }
 
+    let respond_500 = |req: Request, err: &dyn std::fmt::Display| {
+        let resp = Response::from_string(format!("500 Internal Server Error: {err}\n"))
+            .with_status_code(StatusCode(500));
+        let _ = req.respond(resp);
+    };
+
     let path = request.url().split('?').next().unwrap_or("/");
     match path {
         "/" => {
             let today = match return_today() {
                 Ok(d) => d,
                 Err(err) => {
-                    let resp = Response::from_string(format!("500 Internal Server Error: {err}\n"))
-                        .with_status_code(StatusCode(500));
-                    let _ = request.respond(resp);
+                    respond_500(request, &err);
                     return;
                 }
             };
-            match cache.build_dashboard(log_dir, today, force) {
+            match cache.build_dashboard(log_dir, today, force, scale) {
                 Ok(html) => {
                     let mut resp = Response::from_string(html);
-                    if let Ok(ct) = Header::from_bytes("Content-Type", "text/html; charset=utf-8") {
-                        resp.add_header(ct);
-                    }
-                    if let Ok(nosniff) = Header::from_bytes("X-Content-Type-Options", "nosniff") {
-                        resp.add_header(nosniff);
-                    }
-                    if let Ok(cc) = Header::from_bytes("Cache-Control", "no-store") {
-                        resp.add_header(cc);
+                    for (k, v) in [
+                        ("Content-Type", "text/html; charset=utf-8"),
+                        ("X-Content-Type-Options", "nosniff"),
+                        ("Cache-Control", "no-store"),
+                    ] {
+                        if let Ok(h) = Header::from_bytes(k, v) {
+                            resp.add_header(h);
+                        }
                     }
                     let _ = request.respond(resp);
                 }
-                Err(err) => {
-                    let resp = Response::from_string(format!("500 Internal Server Error: {err}\n"))
-                        .with_status_code(StatusCode(500));
-                    let _ = request.respond(resp);
-                }
+                Err(err) => respond_500(request, &err),
             }
         }
         "/health" => {
@@ -135,6 +144,7 @@ Options:
     -l, --log-dir <PATH>    Directory containing beholder logs (default: /var/log/beholder)
     -b, --bind <ADDR>       HTTP listen address (default: 127.0.0.1:6060)
     -f, --force             Bypass cache and reload all log files from disk on each request
+    -s, --scale <FACTOR>    UI/chart scale factor, e.g. 1.25 or 1.5 (range: 0.5..=4.0, default: 1.0)
 "#
     );
 }
@@ -162,6 +172,13 @@ fn parse_args() -> Result<Option<BrotherConfig>, Box<dyn std::error::Error>> {
             Short('f') | Long("force") => {
                 cfg.force = true;
             }
+            Short('s') | Long("scale") => {
+                let scale: f32 = parser.value()?.parse()?;
+                if !scale.is_finite() || !(0.5..=4.0).contains(&scale) {
+                    return Err("scale must be between 0.5 and 4.0".into());
+                }
+                cfg.scale = scale;
+            }
             _ => return Err(arg.unexpected().into()),
         }
     }
@@ -188,7 +205,7 @@ mod tests {
             let mut cache = DashboardCache::new();
             for _ in 0..3 {
                 if let Ok(Some(req)) = server.recv_timeout(Duration::from_secs(2)) {
-                    handle_request(req, &mut cache, &log_dir_clone, false);
+                    handle_request(req, &mut cache, &log_dir_clone, false, 1.0);
                 }
             }
         });

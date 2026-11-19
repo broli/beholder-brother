@@ -4,7 +4,6 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use time::Date;
-use time::macros::format_description;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileStamp {
@@ -67,19 +66,6 @@ pub struct LogInventory {
     pub disk_days: Vec<(Date, PathBuf)>,
 }
 
-fn parse_date_str(s: &str) -> Option<Date> {
-    let format = format_description!("[year]-[month]-[day]");
-    Date::parse(s, &format).ok()
-}
-
-fn parse_prefixed_log_date(filename: &str, prefix: &str) -> Option<Date> {
-    let date_part = filename
-        .strip_prefix(prefix)?
-        .strip_prefix('-')?
-        .strip_suffix(".log")?;
-    parse_date_str(date_part)
-}
-
 /// Scans `log_dir` read-only for `history.log`, `raw-YYYY-MM-DD.log`, and `disks-YYYY-MM-DD.log`.
 pub fn scan_log_dir(log_dir: &Path) -> io::Result<LogInventory> {
     let mut inventory = LogInventory::default();
@@ -102,9 +88,9 @@ pub fn scan_log_dir(log_dir: &Path) -> io::Result<LogInventory> {
 
         if name == "history.log" {
             inventory.history_path = Some(path);
-        } else if let Some(date) = parse_prefixed_log_date(name, "raw") {
+        } else if let Some(date) = crate::parse_prefixed_log_date(name, "raw") {
             inventory.raw_days.push((date, path));
-        } else if let Some(date) = parse_prefixed_log_date(name, "disks") {
+        } else if let Some(date) = crate::parse_prefixed_log_date(name, "disks") {
             inventory.disk_days.push((date, path));
         }
     }
@@ -136,7 +122,7 @@ pub fn parse_history(path: &Path) -> io::Result<Vec<HistoryDay>> {
         let (Some(date_str), Some(metric)) = (cols.next(), cols.next()) else {
             continue;
         };
-        let Some(date) = parse_date_str(date_str) else {
+        let Some(date) = crate::parse_date_str(date_str) else {
             continue;
         };
 
@@ -201,8 +187,7 @@ pub fn parse_raw_log(path: &Path) -> io::Result<Vec<RawPoint>> {
         }
 
         let mut cols = trimmed.split_whitespace();
-        let (Some(ts_s), Some(cpu_s), Some(mem_s), Some(temp_s), Some(net_s), Some(interval_s)) = (
-            cols.next(),
+        let (Some(ts_s), Some(cpu_s), Some(mem_s), Some(temp_s), Some(net_s)) = (
             cols.next(),
             cols.next(),
             cols.next(),
@@ -211,13 +196,16 @@ pub fn parse_raw_log(path: &Path) -> io::Result<Vec<RawPoint>> {
         ) else {
             continue;
         };
+        let interval_ms = cols
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(10_000);
 
-        let (Ok(timestamp), Ok(cpu_pct), Ok(mem_pct), Ok(net_raw), Ok(interval_ms)) = (
+        let (Ok(timestamp), Ok(cpu_pct), Ok(mem_pct), Ok(net_raw)) = (
             ts_s.parse::<u64>(),
             cpu_s.parse::<f32>(),
             mem_s.parse::<f32>(),
             net_s.parse::<u8>(),
-            interval_s.parse::<u64>(),
         ) else {
             continue;
         };
@@ -437,7 +425,7 @@ mod tests {
             "# timestamp cpu_pct mem_pct temp_c net_ok interval_ms\n\
              1000 10.00 40.00 - 1 10000\n\
              1010 20.00 42.00 50.0 0 10000\n\
-             1020 30.00 44.00 52.0 1 10000\n\
+             1020 30.00 44.00 52.0 1\n\
              1030 40.00 46.00 54.0 1 10000\n\
              partial_line\n",
         )?;

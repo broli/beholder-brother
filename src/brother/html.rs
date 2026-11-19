@@ -36,6 +36,7 @@ pub struct HistoryView {
 
 pub struct DashboardData {
     pub log_dir_display: String,
+    pub scale: f32,
     pub live: LiveSummary,
     pub retained: Vec<RetainedDayView>,
     pub history: HistoryView,
@@ -76,6 +77,7 @@ const CSS: &str = r#"
 }
 * { box-sizing: border-box; }
 body {
+  zoom: var(--scale, 1);
   margin: 0;
   padding: 1.5rem;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -184,6 +186,7 @@ fn fmt_opt(val: Option<f32>, suffix: &str) -> String {
 
 pub fn render_page(data: &DashboardData) -> String {
     let mut html = String::with_capacity(32 * 1024);
+    let scale = data.scale;
     let net_badge = match data.live.latest_net_ok {
         Some(true) => r#"<span style="color:var(--green)">ONLINE</span>"#,
         Some(false) => r#"<span style="color:var(--red)">DOWN</span>"#,
@@ -198,7 +201,9 @@ pub fn render_page(data: &DashboardData) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>brother — beholder telemetry</title>
-<style>{CSS}</style>
+<style>{CSS}
+:root {{ --scale: {scale:.2}; }}
+</style>
 </head>
 <body>
 <div class="wrap">
@@ -226,10 +231,13 @@ pub fn render_page(data: &DashboardData) -> String {
     <button class="win-btn" data-win="win-24h">Last 24h</button>
   </div>
   <div id="win-12h" class="chart-grid win-pane active">
-    {c12}{m12}{t12}{disk}
+    {c12}{m12}{t12}
   </div>
   <div id="win-24h" class="chart-grid win-pane">
-    {c24}{m24}{t24}{disk2}
+    {c24}{m24}{t24}
+  </div>
+  <div class="chart-grid" style="margin-top:1.1rem">
+    {disk}
   </div>
 </section>
 
@@ -244,11 +252,10 @@ pub fn render_page(data: &DashboardData) -> String {
         c12 = data.live.cpu_12h_svg,
         m12 = data.live.mem_12h_svg,
         t12 = data.live.temp_12h_svg,
-        disk = data.live.disk_svg,
         c24 = data.live.cpu_24h_svg,
         m24 = data.live.mem_24h_svg,
         t24 = data.live.temp_24h_svg,
-        disk2 = data.live.disk_svg,
+        disk = data.live.disk_svg,
     );
 
     if data.retained.is_empty() {

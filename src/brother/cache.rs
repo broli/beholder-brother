@@ -1,6 +1,6 @@
 use crate::brother::html::{self, DashboardData, HistoryView, LiveSummary, RetainedDayView};
 use crate::brother::logs::{
-    DiskPoint, FileStamp, RawPoint, downsample_raw, parse_disks_log, parse_history, parse_raw_log,
+    FileStamp, RawPoint, downsample_raw, parse_disks_log, parse_history, parse_raw_log,
     scan_log_dir,
 };
 use crate::brother::svg::{
@@ -43,6 +43,7 @@ impl DashboardCache {
         log_dir: &Path,
         today: Date,
         force: bool,
+        scale: f32,
     ) -> io::Result<String> {
         if force {
             self.history = None;
@@ -69,6 +70,7 @@ impl DashboardCache {
 
         let data = DashboardData {
             log_dir_display: log_dir.display().to_string(),
+            scale,
             live,
             retained,
             history,
@@ -171,39 +173,29 @@ fn render_history_view(days: &[crate::brother::logs::HistoryDay]) -> HistoryView
 }
 
 fn render_raw_trio(points: &[RawPoint], prefix: &str) -> (String, String, String) {
-    let cpu_pts: Vec<_> = points
-        .iter()
-        .map(|p| (p.timestamp, Some(p.cpu_pct), p.net_ok))
-        .collect();
-    let mem_pts: Vec<_> = points
-        .iter()
-        .map(|p| (p.timestamp, Some(p.mem_pct), p.net_ok))
-        .collect();
-    let temp_pts: Vec<_> = points
-        .iter()
-        .map(|p| (p.timestamp, p.temp_c, p.net_ok))
-        .collect();
-
     (
         render_raw_line_chart(
             &format!("{prefix} CPU Load %"),
             "%",
             "--blue",
-            &cpu_pts,
+            points,
+            |p| Some(p.cpu_pct),
             Some((0.0, 100.0)),
         ),
         render_raw_line_chart(
             &format!("{prefix} Memory Usage %"),
             "%",
             "--mauve",
-            &mem_pts,
+            points,
+            |p| Some(p.mem_pct),
             Some((0.0, 100.0)),
         ),
         render_raw_line_chart(
             &format!("{prefix} Temperature °C"),
             "°C",
             "--peach",
-            &temp_pts,
+            points,
+            |p| p.temp_c,
             None,
         ),
     )
@@ -223,29 +215,25 @@ fn build_live_summary(
     let latest = live_points.last();
     let latest_ts = latest.map_or(0, |p| p.timestamp);
 
-    let win_12h: Vec<_> = live_points
-        .iter()
-        .filter(|p| p.timestamp >= latest_ts.saturating_sub(SECS_12H))
-        .cloned()
-        .collect();
-    let win_24h: Vec<_> = live_points
-        .iter()
-        .filter(|p| p.timestamp >= latest_ts.saturating_sub(SECS_24H))
-        .cloned()
-        .collect();
+    let idx_12h = live_points.partition_point(|p| p.timestamp < latest_ts.saturating_sub(SECS_12H));
+    let idx_24h = live_points.partition_point(|p| p.timestamp < latest_ts.saturating_sub(SECS_24H));
 
-    let (cpu_12h_svg, mem_12h_svg, temp_12h_svg) =
-        render_raw_trio(&downsample_raw(&win_12h, MAX_RAW_SVG_POINTS), "12h");
-    let (cpu_24h_svg, mem_24h_svg, temp_24h_svg) =
-        render_raw_trio(&downsample_raw(&win_24h, MAX_RAW_SVG_POINTS), "24h");
+    let (cpu_12h_svg, mem_12h_svg, temp_12h_svg) = render_raw_trio(
+        &downsample_raw(&live_points[idx_12h..], MAX_RAW_SVG_POINTS),
+        "12h",
+    );
+    let (cpu_24h_svg, mem_24h_svg, temp_24h_svg) = render_raw_trio(
+        &downsample_raw(&live_points[idx_24h..], MAX_RAW_SVG_POINTS),
+        "24h",
+    );
 
     let disk_svg = if let Some((_, disk_path)) = disk_days.last() {
         let disk_pts = parse_disks_log(disk_path)?;
-        let latest_disks = latest_per_mount(&disk_pts);
-        let refs: Vec<(&str, f32)> = latest_disks
-            .iter()
-            .map(|(m, pct)| (m.as_str(), *pct))
-            .collect();
+        let mut latest_mounts = BTreeMap::new();
+        for p in &disk_pts {
+            latest_mounts.insert(p.mount.as_str(), p.used_pct);
+        }
+        let refs: Vec<(&str, f32)> = latest_mounts.into_iter().collect();
         render_disk_bars(&refs)
     } else {
         render_disk_bars(&[])
@@ -264,14 +252,6 @@ fn build_live_summary(
         mem_24h_svg,
         temp_24h_svg,
     })
-}
-
-fn latest_per_mount(points: &[DiskPoint]) -> Vec<(String, f32)> {
-    let mut map: BTreeMap<String, f32> = BTreeMap::new();
-    for p in points {
-        map.insert(p.mount.clone(), p.used_pct);
-    }
-    map.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -319,20 +299,21 @@ mod tests {
         fs::write(&today_raw, "2000 25.0 50.0 48.0 1 10000\n")?;
 
         let mut cache = DashboardCache::new();
-        let html = cache.build_dashboard(dir.path(), date!(2026 - 11 - 19), false)?;
+        let html = cache.build_dashboard(dir.path(), date!(2026 - 11 - 19), false, 1.0)?;
         assert!(html.contains("Retained Raw (1d)"));
         assert!(html.contains("25.0%"));
         assert_eq!(cache.retained_days.len(), 1);
 
         // Removing the retired past file should evict it from the cache on next build.
         fs::remove_file(&past_raw)?;
-        let html2 = cache.build_dashboard(dir.path(), date!(2026 - 11 - 19), false)?;
+        let html2 = cache.build_dashboard(dir.path(), date!(2026 - 11 - 19), false, 1.0)?;
         assert!(html2.contains("Retained Raw (0d)"));
         assert_eq!(cache.retained_days.len(), 0);
 
         // Force rebuild on empty history still succeeds cleanly.
-        let html3 = cache.build_dashboard(dir.path(), date!(2026 - 11 - 19), true)?;
+        let html3 = cache.build_dashboard(dir.path(), date!(2026 - 11 - 19), true, 1.5)?;
         assert!(html3.contains("<!doctype html>"));
+        assert!(html3.contains("--scale: 1.50"));
         Ok(())
     }
 }
