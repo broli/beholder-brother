@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // read sensor data
         let sample = sense::sense(&config, &mut prev_cpu)?;
         //println!("Sample: {:?}", sample);
-        savelog::append_sample(&config.log_dir, &sample)?;
+        savelog::append_sample(&config.log_dir, &sample, config.interval_ms)?;
 
         if tick.is_multiple_of(60) {
             let disk_samples = sense::sense_disks(&config)?;
@@ -79,7 +79,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let today = return_today()?;
         if last_rotate_day != Some(today) {
-            rollout::rollup_and_retire(&config, &today)?;
+            if let Err(err) = rollout::rollup_and_retire(&config, &today) {
+                eprintln!("Rollup/retire error for {today}: {err}");
+            }
             last_rotate_day = Some(today);
         }
 
