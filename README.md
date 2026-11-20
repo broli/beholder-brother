@@ -5,14 +5,14 @@ Lightweight system telemetry daemon (`beholder`) and read-only HTML/SVG viewer (
 ## Binaries
 
 - **`beholder`**: Samples CPU, memory, disk usage, SoC temperature, and TCP reachability into daily append-only logs, then rolls past days into `history.log` and archives/retires expired files.
-- **`brother`**: Read-only HTTP server rendering a 3-tab dashboard (Live 12h/24h, Retained Raw, Historical) with inline SVGs and Catppuccin Latte/Mocha styling.
+- **`brother`**: Read-only HTTP server rendering a 3-tab dashboard (Live 12h/24h, Retained Raw, Historical) with inline SVGs and light/dark theming.
 
 ## Log Layout (`--log-dir`)
 
-- `raw-YYYY-MM-DD.log` — `# timestamp cpu_pct mem_pct temp_c net_ok interval_ms`
-- `disks-YYYY-MM-DD.log` — `# timestamp mount used_pct`
-- `history.log` — `# date metric min avg max p95` (`cpu_pct`, `mem_pct`, `temp_c`, `net_down_sec`)
-- `archive/` — retired logs when `--archive` is `gzip` (default) or `plain`
+- `raw-YYYY-MM-DD.log`: `# timestamp cpu_pct mem_pct temp_c net_ok interval_ms`
+- `disks-YYYY-MM-DD.log`: `# timestamp mount used_pct`
+- `history.log`: `# date metric min avg max p95` (`cpu_pct`, `mem_pct`, `temp_c`, `net_down_sec`)
+- `archive/`: retired logs when `--archive` is `gzip` (default) or `plain`
 
 ## Build & Test
 
@@ -62,6 +62,5 @@ For remote machines, sync `/var/log/beholder` locally via `rsync`/`scp`, tunnel 
 
 ## Notes & Known Limitations
 
-- **`Ctrl+C` shutdown in `beholder`**: Right now `beholder` sleeps for the full `--interval` between ticks, so hitting `Ctrl+C` can wait up to one interval before exiting. I don't know how to handle this situation cleanly yet—I'll fix it in a future release. For now it works.
-- **Thermal zones**: Currently only reads `/sys/class/thermal/thermal_zone0/temp`. Supporting multiple thermal zones / `hwmon` sensors while keeping the lightweight zero-bloat philosophy is on the plan for the future.
-- **Single-threaded HTTP (`brother`)**: By design philosophy, I prefer the app to stay single-threaded even if a slow client can briefly stall another browser refresh. Keeping it simple and tiny matters more here than concurrent request handling.
+- **Thermal zones**: Reads `/sys/class/thermal/thermal_zone0/temp` only. Multi-zone / `hwmon` support is not implemented yet.
+- **Single-threaded HTTP (`brother`)**: Serves requests sequentially on one thread to keep the binary and runtime footprint small; a stalled client briefly delays other requests.

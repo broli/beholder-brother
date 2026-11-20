@@ -3,7 +3,6 @@ use std::fmt::Write as _;
 
 const CHART_W: f32 = 800.0;
 const CHART_H: f32 = 220.0;
-const SHADOW_OFFSET: f32 = 5.0;
 const PAD_LEFT: f32 = 52.0;
 const PAD_RIGHT: f32 = 18.0;
 const PAD_TOP: f32 = 34.0;
@@ -11,7 +10,6 @@ const PAD_BOTTOM: f32 = 28.0;
 const PLOT_W: f32 = CHART_W - PAD_LEFT - PAD_RIGHT;
 const PLOT_H: f32 = CHART_H - PAD_TOP - PAD_BOTTOM;
 
-/// Escapes XML/HTML special characters so dynamic labels (e.g. mount paths) are XSS-safe.
 pub fn escape_xml(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -37,7 +35,11 @@ fn map_x(idx: usize, len: usize) -> f32 {
 
 fn map_y(val: f32, y_min: f32, y_max: f32) -> f32 {
     let span = (y_max - y_min).max(0.001);
-    let norm = ((val - y_min) / span).clamp(0.0, 1.0);
+    let norm = if val.is_finite() {
+        ((val - y_min) / span).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     PAD_TOP + (1.0 - norm) * PLOT_H
 }
 
@@ -69,26 +71,21 @@ fn start_svg_card(buf: &mut String, title: &str) {
 }
 
 fn start_svg_card_sized(buf: &mut String, title: &str, card_h: f32) {
-    let total_w = CHART_W + SHADOW_OFFSET;
-    let total_h = card_h + SHADOW_OFFSET;
+    let escaped = escape_xml(title);
     let _ = writeln!(
         buf,
-        r#"<svg viewBox="0 0 {total_w} {total_h}" class="chart-svg" role="img" aria-label="{title}">"#,
-        title = escape_xml(title)
+        r#"<svg viewBox="0 0 {CHART_W} {card_h}" class="chart-svg" role="img" aria-label="{escaped}">"#
     );
-    // Solid +5,+5 offset shadow card behind the chart frame
+    let _ = writeln!(buf, "  <title>{escaped}</title>");
     let _ = writeln!(
         buf,
-        r#"  <rect x="{SHADOW_OFFSET}" y="{SHADOW_OFFSET}" width="{CHART_W}" height="{card_h}" rx="10" fill="var(--shadow)"/>"#
-    );
-    let _ = writeln!(
-        buf,
-        r#"  <rect x="0" y="0" width="{CHART_W}" height="{card_h}" rx="10" fill="var(--surface)" stroke="var(--overlay)" stroke-width="1"/>"#
+        r#"  <rect x="0.5" y="0.5" width="{w}" height="{h}" rx="6" fill="var(--surface)" stroke="var(--border)" stroke-width="1"/>"#,
+        w = CHART_W - 1.0,
+        h = card_h - 1.0
     );
     let _ = writeln!(
         buf,
-        r#"  <text x="16" y="22" font-size="13" font-weight="600" fill="var(--text)">{}</text>"#,
-        escape_xml(title)
+        r#"  <text x="16" y="22" font-size="13" font-weight="600" fill="var(--ink)">{escaped}</text>"#
     );
 }
 
@@ -104,7 +101,7 @@ fn draw_y_grid(buf: &mut String, y_min: f32, y_max: f32, unit: &str) {
         );
         let _ = writeln!(
             buf,
-            r#"  <text x="{x:.1}" y="{ty:.1}" font-size="10" text-anchor="end" fill="var(--subtext)">{val:.0}{unit}</text>"#,
+            r#"  <text x="{x:.1}" y="{ty:.1}" font-size="10" text-anchor="end" fill="var(--muted)">{val:.0}{unit}</text>"#,
             x = PAD_LEFT - 6.0,
             ty = y + 3.5,
             unit = escape_xml(unit)
@@ -117,13 +114,39 @@ fn draw_empty_state(buf: &mut String, message: &str) {
     let cy = CHART_H / 2.0 + 6.0;
     let _ = writeln!(
         buf,
-        r#"  <text x="{cx}" y="{cy}" font-size="13" text-anchor="middle" fill="var(--subtext)">{}</text>"#,
+        r#"  <text x="{cx}" y="{cy}" font-size="13" text-anchor="middle" fill="var(--muted)">{}</text>"#,
         escape_xml(message)
     );
     buf.push_str("</svg>\n");
 }
 
-/// Renders an intraday line chart directly from `RawPoint` slices.
+fn write_raw_segment(
+    buf: &mut String,
+    segment: &mut String,
+    first: &mut Option<(f32, f32, f32)>,
+    count: &mut usize,
+    color_var: &str,
+    unit: &str,
+) {
+    if *count == 1
+        && let Some((x, y, val)) = first.take()
+    {
+        let _ = writeln!(
+            buf,
+            r#"  <circle cx="{x:.1}" cy="{y:.1}" r="3.5" fill="var({color_var})"><title>{val:.1}{unit}</title></circle>"#,
+            unit = escape_xml(unit)
+        );
+    } else if *count > 1 {
+        let _ = writeln!(
+            buf,
+            r#"  <polyline fill="none" stroke="var({color_var})" stroke-width="2" stroke-linejoin="round" points="{segment}"/>"#
+        );
+    }
+    segment.clear();
+    *first = None;
+    *count = 0;
+}
+
 pub fn render_raw_line_chart(
     title: &str,
     unit: &str,
@@ -144,59 +167,53 @@ pub fn render_raw_line_chart(
     let (y_min, y_max) = compute_bounds(points.iter().filter_map(extract), fixed_bounds);
     draw_y_grid(&mut buf, y_min, y_max, unit);
 
-    let flush_segment = |buf: &mut String,
-                         segment: &mut String,
-                         single: &mut Option<(f32, f32, f32)>| {
-        if let Some((x, y, val)) = single.take() {
-            if segment.split_whitespace().count() == 1 {
-                let _ = writeln!(
-                    buf,
-                    r#"  <circle cx="{x:.1}" cy="{y:.1}" r="3.5" fill="var({color_var})"><title>{val:.1}{unit}</title></circle>"#,
-                    unit = escape_xml(unit)
-                );
-            } else if !segment.is_empty() {
-                let _ = writeln!(
-                    buf,
-                    r#"  <polyline fill="none" stroke="var({color_var})" stroke-width="2" stroke-linejoin="round" points="{segment}"/>"#
-                );
-            }
-        }
-        segment.clear();
-    };
-
-    // Draw contiguous polyline segments (emitting circles for isolated 1-point segments)
     let mut segment = String::new();
-    let mut single: Option<(f32, f32, f32)> = None;
+    let mut first = None;
+    let mut count = 0usize;
     for (i, p) in points.iter().enumerate() {
         if let Some(val) = extract(p) {
             let x = map_x(i, points.len());
             let y = map_y(val, y_min, y_max);
-            if !segment.is_empty() {
+            if count == 0 {
+                first = Some((x, y, val));
+            } else {
                 segment.push(' ');
             }
             let _ = write!(segment, "{x:.1},{y:.1}");
-            single = Some((x, y, val));
+            count += 1;
         } else {
-            flush_segment(&mut buf, &mut segment, &mut single);
+            write_raw_segment(
+                &mut buf,
+                &mut segment,
+                &mut first,
+                &mut count,
+                color_var,
+                unit,
+            );
         }
     }
-    flush_segment(&mut buf, &mut segment, &mut single);
+    write_raw_segment(
+        &mut buf,
+        &mut segment,
+        &mut first,
+        &mut count,
+        color_var,
+        unit,
+    );
 
-    // Highlight network outage ticks at the bottom axis
     let base_y = PAD_TOP + PLOT_H;
     for (i, p) in points.iter().enumerate() {
         if !p.net_ok {
             let x = map_x(i, points.len());
             let _ = writeln!(
                 buf,
-                r#"  <line x1="{x:.1}" y1="{y1:.1}" x2="{x:.1}" y2="{base_y:.1}" stroke="var(--red)" stroke-width="2"><title>Network down @ {ts}</title></line>"#,
+                r#"  <line x1="{x:.1}" y1="{y1:.1}" x2="{x:.1}" y2="{base_y:.1}" stroke="var(--status-err)" stroke-width="2"><title>Network down @ {ts}</title></line>"#,
                 ts = p.timestamp,
                 y1 = base_y - 8.0
             );
         }
     }
 
-    // Latest value badge in top-right corner
     if let Some(last_v) = points.iter().rev().find_map(extract) {
         let _ = writeln!(
             buf,
@@ -210,7 +227,6 @@ pub fn render_raw_line_chart(
     buf
 }
 
-/// Renders a multi-day `history.log` chart with min-max shaded band, dashed p95, and solid avg.
 pub fn render_history_band_chart(
     title: &str,
     unit: &str,
@@ -239,46 +255,54 @@ pub fn render_history_band_chart(
 
     let len = active.len();
     if len >= 2 {
-        // Min-max shaded polygon: top edge (max) left-to-right, bottom edge (min) right-to-left
-        let mut poly = String::new();
+        buf.push_str(r#"  <polygon fill="var("#);
+        buf.push_str(color_var);
+        buf.push_str(r#")" fill-opacity="0.18" points=""#);
         for (i, &(_, s)) in active.iter().enumerate() {
             let x = map_x(i, len);
             let y = map_y(s.max, y_min, y_max);
-            let _ = write!(poly, "{x:.1},{y:.1} ");
+            let _ = write!(buf, "{x:.1},{y:.1} ");
         }
         for (i, &(_, s)) in active.iter().enumerate().rev() {
             let x = map_x(i, len);
             let y = map_y(s.min, y_min, y_max);
-            let _ = write!(poly, "{x:.1},{y:.1} ");
+            if i == 0 {
+                let _ = write!(buf, "{x:.1},{y:.1}");
+            } else {
+                let _ = write!(buf, "{x:.1},{y:.1} ");
+            }
         }
-        let _ = writeln!(
-            buf,
-            r#"  <polygon fill="var({color_var})" fill-opacity="0.18" points="{}"/>"#,
-            poly.trim_end()
-        );
+        buf.push_str("\"/>\n");
 
-        let mut p95_pts = String::new();
-        let mut avg_pts = String::new();
+        let _ = write!(
+            buf,
+            r#"  <polyline fill="none" stroke="var({color_var})" stroke-opacity="0.7" stroke-width="1.5" stroke-dasharray="4 3" points=""#
+        );
         for (i, &(_, s)) in active.iter().enumerate() {
             let x = map_x(i, len);
-            let yp = map_y(s.p95, y_min, y_max);
-            let ya = map_y(s.avg, y_min, y_max);
-            let _ = write!(p95_pts, "{x:.1},{yp:.1} ");
-            let _ = write!(avg_pts, "{x:.1},{ya:.1} ");
+            let y = map_y(s.p95, y_min, y_max);
+            if i > 0 {
+                buf.push(' ');
+            }
+            let _ = write!(buf, "{x:.1},{y:.1}");
         }
-        let _ = writeln!(
+        buf.push_str("\"/>\n");
+
+        let _ = write!(
             buf,
-            r#"  <polyline fill="none" stroke="var({color_var})" stroke-opacity="0.7" stroke-width="1.5" stroke-dasharray="4 3" points="{}"/>"#,
-            p95_pts.trim_end()
+            r#"  <polyline fill="none" stroke="var({color_var})" stroke-width="2.2" stroke-linejoin="round" points=""#
         );
-        let _ = writeln!(
-            buf,
-            r#"  <polyline fill="none" stroke="var({color_var})" stroke-width="2.2" stroke-linejoin="round" points="{}"/>"#,
-            avg_pts.trim_end()
-        );
+        for (i, &(_, s)) in active.iter().enumerate() {
+            let x = map_x(i, len);
+            let y = map_y(s.avg, y_min, y_max);
+            if i > 0 {
+                buf.push(' ');
+            }
+            let _ = write!(buf, "{x:.1},{y:.1}");
+        }
+        buf.push_str("\"/>\n");
     }
 
-    // Interactive hover dots with native <title> tooltips
     for (i, &(date, s)) in active.iter().enumerate() {
         let x = map_x(i, len);
         let y = map_y(s.avg, y_min, y_max);
@@ -293,17 +317,16 @@ pub fn render_history_band_chart(
         );
     }
 
-    // First and last date labels on X axis
     if let (Some((first_d, _)), Some((last_d, _))) = (active.first(), active.last()) {
         let y_lbl = CHART_H - 8.0;
         let _ = writeln!(
             buf,
-            r#"  <text x="{PAD_LEFT:.1}" y="{y_lbl:.1}" font-size="10" fill="var(--subtext)">{first_d}</text>"#
+            r#"  <text x="{PAD_LEFT:.1}" y="{y_lbl:.1}" font-size="10" fill="var(--muted)">{first_d}</text>"#
         );
         if active.len() > 1 {
             let _ = writeln!(
                 buf,
-                r#"  <text x="{x:.1}" y="{y_lbl:.1}" font-size="10" text-anchor="end" fill="var(--subtext)">{last_d}</text>"#,
+                r#"  <text x="{x:.1}" y="{y_lbl:.1}" font-size="10" text-anchor="end" fill="var(--muted)">{last_d}</text>"#,
                 x = CHART_W - PAD_RIGHT
             );
         }
@@ -313,7 +336,6 @@ pub fn render_history_band_chart(
     buf
 }
 
-/// Renders a daily bar chart for `net_down_sec` from `history.log`.
 pub fn render_net_down_chart(days: &[HistoryDay]) -> String {
     let mut buf = String::with_capacity(1536);
     start_svg_card(&mut buf, "Network Downtime (seconds/day)");
@@ -344,9 +366,9 @@ pub fn render_net_down_chart(days: &[HistoryDay]) -> String {
         let h = (base_y - top_y).max(2.0);
         let y = base_y - h;
         let fill = if sec == 0 {
-            "var(--green)"
+            "var(--status-ok)"
         } else {
-            "var(--red)"
+            "var(--status-err)"
         };
         let _ = writeln!(
             buf,
@@ -358,7 +380,6 @@ pub fn render_net_down_chart(days: &[HistoryDay]) -> String {
     buf
 }
 
-/// Renders horizontal disk usage bars for the latest snapshot of each mount point.
 pub fn render_disk_bars(mounts: &[(&str, f32)]) -> String {
     let mut buf = String::with_capacity(1024);
     if mounts.is_empty() {
@@ -380,34 +401,38 @@ pub fn render_disk_bars(mounts: &[(&str, f32)]) -> String {
 
     for (i, &(mount, pct)) in mounts.iter().enumerate() {
         let y = PAD_TOP + 6.0 + i as f32 * row_h;
-        let clamped = pct.clamp(0.0, 100.0);
+        let clamped = if pct.is_finite() {
+            pct.clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
         let fill_w = (clamped / 100.0) * bar_max_w;
         let color = if clamped >= 90.0 {
-            "var(--red)"
+            "var(--status-err)"
         } else if clamped >= 75.0 {
-            "var(--peach)"
+            "var(--status-warn)"
         } else {
-            "var(--green)"
+            "var(--status-ok)"
         };
 
         let _ = writeln!(
             buf,
-            r#"  <text x="{x:.1}" y="{ty:.1}" font-size="12" text-anchor="end" fill="var(--text)">{}</text>"#,
+            r#"  <text x="{x:.1}" y="{ty:.1}" font-size="12" text-anchor="end" fill="var(--ink)">{}</text>"#,
             escape_xml(mount),
             x = bar_x - 10.0,
             ty = y + 13.0
         );
         let _ = writeln!(
             buf,
-            r#"  <rect x="{bar_x}" y="{y:.1}" width="{bar_max_w:.1}" height="16" rx="4" fill="var(--grid)"/>"#
+            r#"  <rect x="{bar_x}" y="{y:.1}" width="{bar_max_w:.1}" height="16" rx="3" fill="var(--grid)"/>"#
         );
         let _ = writeln!(
             buf,
-            r#"  <rect x="{bar_x}" y="{y:.1}" width="{fill_w:.1}" height="16" rx="4" fill="{color}"/>"#
+            r#"  <rect x="{bar_x}" y="{y:.1}" width="{fill_w:.1}" height="16" rx="3" fill="{color}"/>"#
         );
         let _ = writeln!(
             buf,
-            r#"  <text x="{lx:.1}" y="{ty:.1}" font-size="12" font-weight="600" fill="var(--text)">{clamped:.1}%</text>"#,
+            r#"  <text x="{lx:.1}" y="{ty:.1}" font-size="12" font-weight="600" fill="var(--ink)">{clamped:.1}%</text>"#,
             lx = bar_x + bar_max_w + 8.0,
             ty = y + 13.0
         );
@@ -438,19 +463,19 @@ mod tests {
         let empty = render_raw_line_chart(
             "CPU %",
             "%",
-            "--blue",
+            "--series-cpu",
             &[],
             |p| Some(p.cpu_pct),
             Some((0.0, 100.0)),
         );
-        assert!(empty.contains("viewBox=\"0 0 805 225\""));
+        assert!(empty.contains("viewBox=\"0 0 800 220\""));
         assert!(empty.contains("No samples available"));
         assert!(!empty.contains("NaN"));
 
         let single = render_raw_line_chart(
             "Temp",
             "°C",
-            "--peach",
+            "--series-temp",
             &[pt(1000, 10.0, Some(48.5), false)],
             |p| p.temp_c,
             None,
@@ -468,7 +493,14 @@ mod tests {
             pt(1020, 10.0, None, true),
             pt(1030, 10.0, Some(47.0), true),
         ];
-        let svg = render_raw_line_chart("Temp <SoC>", "°C", "--peach", &pts, |p| p.temp_c, None);
+        let svg = render_raw_line_chart(
+            "Temp <SoC>",
+            "°C",
+            "--series-temp",
+            &pts,
+            |p| p.temp_c,
+            None,
+        );
         assert!(svg.contains("Temp &lt;SoC&gt;"));
         assert_eq!(svg.matches("<polyline").count(), 1);
         assert_eq!(svg.matches("<circle").count(), 1);
@@ -506,7 +538,7 @@ mod tests {
         let cpu_svg = render_history_band_chart(
             "CPU History",
             "%",
-            "--blue",
+            "--series-cpu",
             &days,
             |d| d.cpu.as_ref(),
             Some((0.0, 100.0)),
@@ -516,7 +548,7 @@ mod tests {
         assert!(!cpu_svg.contains("NaN"));
 
         let net_svg = render_net_down_chart(&days);
-        assert_eq!(net_svg.matches("<rect").count(), 4); // 2 card rects + 2 bars
+        assert_eq!(net_svg.matches("<rect").count(), 3); // 1 card rect + 2 bars
 
         let disk_svg = render_disk_bars(&[("/", 62.5), ("/home", 81.0)]);
         assert!(disk_svg.contains("62.5%"));

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use beholder_brother::brother::cache::DashboardCache;
-use beholder_brother::{Error, Result, return_today};
+use beholder_brother::{Error, Result, today_utc};
 use lexopt::prelude::*;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ fn main() -> Result<()> {
     let r = running.clone();
     ctrlc::set_handler(move || {
         eprintln!("\nInterrupt received, shutting down brother...");
-        r.store(false, Ordering::SeqCst);
+        r.store(false, Ordering::Relaxed);
     })?;
 
     let server = Server::http(cfg.bind_addr)
@@ -50,15 +50,14 @@ fn main() -> Result<()> {
     );
 
     let mut cache = DashboardCache::default();
-    // Warm the cache on startup so the first browser load is instant.
     if !cfg.force
-        && let Ok(today) = return_today()
+        && let Ok(today) = today_utc()
         && let Err(err) = cache.build_dashboard(&cfg.log_dir, today, false, cfg.scale)
     {
         eprintln!("Warning: initial dashboard build failed: {err}");
     }
 
-    while running.load(Ordering::SeqCst) {
+    while running.load(Ordering::Relaxed) {
         match server.recv_timeout(Duration::from_millis(500)) {
             Ok(Some(request)) => {
                 handle_request(request, &mut cache, &cfg.log_dir, cfg.force, cfg.scale);
@@ -72,6 +71,13 @@ fn main() -> Result<()> {
 
     println!("brother stopped cleanly.");
     Ok(())
+}
+
+fn respond_500(req: Request, err: &Error) {
+    eprintln!("Internal server error: {err}");
+    let resp =
+        Response::from_string("500 Internal Server Error\n").with_status_code(StatusCode(500));
+    let _ = req.respond(resp);
 }
 
 fn handle_request(
@@ -88,17 +94,11 @@ fn handle_request(
         return;
     }
 
-    let respond_500 = |req: Request, err: &dyn std::fmt::Display| {
-        eprintln!("Internal server error: {err}");
-        let resp =
-            Response::from_string("500 Internal Server Error\n").with_status_code(StatusCode(500));
-        let _ = req.respond(resp);
-    };
-
-    let path = request.url().split('?').next().unwrap_or("/");
+    let url = request.url();
+    let path = url.split_once('?').map_or(url, |(p, _)| p);
     match path {
         "/" => {
-            let today = match return_today() {
+            let today = match today_utc() {
                 Ok(d) => d,
                 Err(err) => {
                     respond_500(request, &err);
@@ -107,7 +107,7 @@ fn handle_request(
             };
             match cache.build_dashboard(log_dir, today, force, scale) {
                 Ok(html) => {
-                    let mut resp = Response::from_string(html);
+                    let mut resp = Response::from_string(&*html);
                     for (k, v) in [
                         ("Content-Type", "text/html; charset=utf-8"),
                         ("X-Content-Type-Options", "nosniff"),
@@ -178,7 +178,7 @@ fn parse_args() -> Result<Option<BrotherConfig>> {
                 let scale: f32 = parser.value()?.parse()?;
                 if !scale.is_finite() || !(0.5..=4.0).contains(&scale) {
                     return Err(Error::InvalidArg(
-                        "scale must be between 0.5 and 4.0".to_string(),
+                        "scale must be between 0.5 and 4.0".into(),
                     ));
                 }
                 cfg.scale = scale;
@@ -194,8 +194,21 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpStream;
+    use std::sync::atomic::AtomicU64;
+
+    static BROTHER_TEST_SEQ: AtomicU64 = AtomicU64::new(0);
 
     struct TestDirGuard(std::path::PathBuf);
+
+    impl TestDirGuard {
+        fn new() -> Self {
+            let seq = BROTHER_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+            Self(
+                std::env::temp_dir()
+                    .join(format!("brother_http_test_{}_{seq}", std::process::id())),
+            )
+        }
+    }
 
     impl Drop for TestDirGuard {
         fn drop(&mut self) {
@@ -209,11 +222,9 @@ mod tests {
         let addr = server
             .server_addr()
             .to_ip()
-            .ok_or_else(|| Error::Server("missing bound ip".to_string()))?;
+            .ok_or_else(|| Error::Server("missing bound ip".into()))?;
 
-        let log_dir = TestDirGuard(
-            std::env::temp_dir().join(format!("brother_http_test_{}", std::process::id())),
-        );
+        let log_dir = TestDirGuard::new();
         std::fs::create_dir_all(&log_dir.0)?;
         let log_dir_clone = log_dir.0.clone();
 
@@ -239,7 +250,7 @@ mod tests {
 
         let root_resp = send_get("/")?;
         assert!(root_resp.starts_with("HTTP/1.1 200"));
-        assert!(root_resp.contains("<!doctype html>"));
+        assert!(root_resp.contains("<!DOCTYPE html>"));
 
         let health_resp = send_get("/health")?;
         assert!(health_resp.starts_with("HTTP/1.1 200"));

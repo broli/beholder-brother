@@ -2,6 +2,7 @@ use std::fmt;
 use std::io;
 use std::net::AddrParseError;
 use std::num::{ParseFloatError, ParseIntError};
+use std::time::SystemTimeError;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -9,6 +10,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     Io(io::Error),
     Nix(nix::errno::Errno),
+    Clock(SystemTimeError),
     TimeRange(time::error::ComponentRange),
     TimeFormat(time::error::Format),
     Cli(lexopt::Error),
@@ -23,6 +25,7 @@ impl fmt::Display for Error {
         match self {
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::Nix(e) => write!(f, "syscall error: {e}"),
+            Self::Clock(e) => write!(f, "system clock error: {e}"),
             Self::TimeRange(e) => write!(f, "timestamp out of range: {e}"),
             Self::TimeFormat(e) => write!(f, "time format error: {e}"),
             Self::Cli(e) => write!(f, "argument error: {e}"),
@@ -39,6 +42,7 @@ impl std::error::Error for Error {
         match self {
             Self::Io(e) => Some(e),
             Self::Nix(e) => Some(e),
+            Self::Clock(e) => Some(e),
             Self::TimeRange(e) => Some(e),
             Self::TimeFormat(e) => Some(e),
             Self::Cli(e) => Some(e),
@@ -57,6 +61,12 @@ impl From<io::Error> for Error {
 impl From<nix::errno::Errno> for Error {
     fn from(e: nix::errno::Errno) -> Self {
         Self::Nix(e)
+    }
+}
+
+impl From<SystemTimeError> for Error {
+    fn from(e: SystemTimeError) -> Self {
+        Self::Clock(e)
     }
 }
 
@@ -99,17 +109,5 @@ impl From<ParseIntError> for Error {
 impl From<ParseFloatError> for Error {
     fn from(e: ParseFloatError) -> Self {
         Self::InvalidArg(e.to_string())
-    }
-}
-
-impl From<&'static str> for Error {
-    fn from(msg: &'static str) -> Self {
-        Self::Parse(msg.to_string())
-    }
-}
-
-impl From<String> for Error {
-    fn from(msg: String) -> Self {
-        Self::Parse(msg)
     }
 }
