@@ -1,11 +1,11 @@
 # beholder-brother
 
-Lightweight system telemetry daemon (`beholder`) and read-only HTML/SVG viewer (`brother`) for low-power Linux boxes. Plain-text logs, zero databases, zero frontend build steps.
+Lightweight system telemetry daemon (`beholder`) and read-only visualazer (`brother`) for low-power Linux boxes. Plain-text logs, zero databases, zero frontend build steps. As little dependencies as possible. 
 
 ## Binaries
 
 - **`beholder`**: Samples CPU, memory, disk usage, SoC temperature, and TCP reachability into daily append-only logs, then rolls past days into `history.log` and archives/retires expired files.
-- **`brother`**: Read-only HTTP server rendering a 3-tab dashboard (Live 12h/24h, Retained Raw, Historical) with inline SVGs and light/dark theming.
+- **`brother`**: Read-only HTTP server rendering the dashboard (Live 12h/24h, Retained Raw, Historical) with inline SVGs and light/dark theming ~stolen~ borrowed() from the internet.
 
 ## Log Layout (`--log-dir`)
 
@@ -25,6 +25,8 @@ just pedantic-test # clippy pedantic + nursery
 ```
 
 ## Usage
+I would recommend you set the --interval to 60000
+If you are trying to catch a specific issue, use a smaller interval and --flush 
 
 ### `beholder`
 
@@ -57,9 +59,6 @@ Options:
     -f, --force             Bypass SVG cache and reload from disk per request
     -s, --scale <FACTOR>    Page zoom factor in 0.5..=4.0 (default: 1.0)
 ```
-
-For remote machines, sync `/var/log/beholder` locally via `rsync`/`scp`, tunnel `127.0.0.1:6060` over SSH (`ssh -L 6060:127.0.0.1:6060`), or bind `brother` to the host's WireGuard IP (`--bind <wg-ip>:6060`).
-
 ## Notes & Known Limitations
 
 - **Thermal zones**: Reads `/sys/class/thermal/thermal_zone0/temp` only. Multi-zone / `hwmon` support is not implemented yet.
