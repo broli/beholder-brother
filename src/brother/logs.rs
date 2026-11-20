@@ -1,26 +1,28 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::io::BufRead;
+use std::path::Path;
 use std::time::SystemTime;
 use time::Date;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+use crate::{DEFAULT_INTERVAL_MS, Result};
+pub use crate::{LogInventory, RawPoint, scan_log_dir};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileStamp {
     pub modified: Option<SystemTime>,
     pub len: u64,
 }
 
 impl FileStamp {
-    /// Reads file metadata without opening or mutating the file's contents.
-    pub fn from_path(path: &Path) -> io::Result<Option<Self>> {
+    pub fn from_path(path: &Path) -> Result<Option<Self>> {
         match fs::metadata(path) {
             Ok(meta) => Ok(Some(Self {
                 modified: meta.modified().ok(),
                 len: meta.len(),
             })),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
         }
     }
 }
@@ -43,75 +45,20 @@ pub struct HistoryDay {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RawPoint {
-    pub timestamp: u64,
-    pub cpu_pct: f32,
-    pub mem_pct: f32,
-    pub temp_c: Option<f32>,
-    pub net_ok: bool,
-    pub interval_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct DiskPoint {
     pub timestamp: u64,
     pub mount: String,
     pub used_pct: f32,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LogInventory {
-    pub history_path: Option<PathBuf>,
-    pub raw_days: Vec<(Date, PathBuf)>,
-    pub disk_days: Vec<(Date, PathBuf)>,
-}
-
-/// Scans `log_dir` read-only for `history.log`, `raw-YYYY-MM-DD.log`, and `disks-YYYY-MM-DD.log`.
-pub fn scan_log_dir(log_dir: &Path) -> io::Result<LogInventory> {
-    let mut inventory = LogInventory::default();
-
-    let entries = match fs::read_dir(log_dir) {
-        Ok(rd) => rd,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(inventory),
-        Err(err) => return Err(err),
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-
-        if name == "history.log" {
-            inventory.history_path = Some(path);
-        } else if let Some(date) = crate::parse_prefixed_log_date(name, "raw") {
-            inventory.raw_days.push((date, path));
-        } else if let Some(date) = crate::parse_prefixed_log_date(name, "disks") {
-            inventory.disk_days.push((date, path));
-        }
-    }
-
-    inventory.raw_days.sort_by_key(|(date, _)| *date);
-    inventory.disk_days.sort_by_key(|(date, _)| *date);
-    Ok(inventory)
-}
-
-/// Parses `history.log` into daily summaries sorted ascending by date.
-/// Returns an empty `Vec` if the file does not exist yet.
-pub fn parse_history(path: &Path) -> io::Result<Vec<HistoryDay>> {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
+pub fn parse_history(path: &Path) -> Result<Vec<HistoryDay>> {
+    let Some(reader) = crate::open_if_exists(path)? else {
+        return Ok(Vec::new());
     };
 
     let mut days: BTreeMap<Date, HistoryDay> = BTreeMap::new();
 
-    for line_res in BufReader::new(file).lines() {
+    for line_res in reader.lines() {
         let line = line_res?;
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -170,114 +117,83 @@ pub fn parse_history(path: &Path) -> io::Result<Vec<HistoryDay>> {
     Ok(days.into_values().collect())
 }
 
-/// Parses a `raw-YYYY-MM-DD.log` file, skipping comments and malformed/partial lines.
-pub fn parse_raw_log(path: &Path) -> io::Result<Vec<RawPoint>> {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
+pub fn parse_raw_log(path: &Path) -> Result<Vec<RawPoint>> {
+    let Some(reader) = crate::open_if_exists(path)? else {
+        return Ok(Vec::new());
     };
 
     let mut points = Vec::new();
-    for line_res in BufReader::new(file).lines() {
+    for line_res in reader.lines() {
         let line = line_res?;
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-
-        let mut cols = trimmed.split_whitespace();
-        let (Some(ts_s), Some(cpu_s), Some(mem_s), Some(temp_s), Some(net_s)) = (
-            cols.next(),
-            cols.next(),
-            cols.next(),
-            cols.next(),
-            cols.next(),
-        ) else {
-            continue;
-        };
-        let interval_ms = cols
-            .next()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(10_000);
-
-        let (Ok(timestamp), Ok(cpu_pct), Ok(mem_pct), Ok(net_raw)) = (
-            ts_s.parse::<u64>(),
-            cpu_s.parse::<f32>(),
-            mem_s.parse::<f32>(),
-            net_s.parse::<u8>(),
-        ) else {
-            continue;
-        };
-
-        if !(cpu_pct.is_finite() && mem_pct.is_finite()) {
-            continue;
+        if let Some(pt) = crate::parse_raw_line(trimmed, DEFAULT_INTERVAL_MS) {
+            points.push(pt);
         }
+    }
 
-        let temp_c = if temp_s == "-" {
-            None
+    Ok(points)
+}
+
+fn parse_disk_line(line: &str) -> Option<(u64, &str, f32)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+
+    let (ts_s, rest) = trimmed.split_once(char::is_whitespace)?;
+    let (mount_raw, used_s) = rest.trim_start().rsplit_once(char::is_whitespace)?;
+    let (Ok(timestamp), Ok(used_pct)) = (ts_s.parse::<u64>(), used_s.trim().parse::<f32>()) else {
+        return None;
+    };
+    used_pct
+        .is_finite()
+        .then_some((timestamp, mount_raw.trim(), used_pct))
+}
+
+pub fn parse_disks_log(path: &Path) -> Result<Vec<DiskPoint>> {
+    let Some(reader) = crate::open_if_exists(path)? else {
+        return Ok(Vec::new());
+    };
+
+    let mut points = Vec::new();
+    for line_res in reader.lines() {
+        let line = line_res?;
+        if let Some((timestamp, mount, used_pct)) = parse_disk_line(&line) {
+            points.push(DiskPoint {
+                timestamp,
+                mount: mount.to_string(),
+                used_pct,
+            });
+        }
+    }
+
+    Ok(points)
+}
+
+pub fn parse_latest_disks(path: &Path) -> Result<BTreeMap<String, f32>> {
+    let Some(reader) = crate::open_if_exists(path)? else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut latest: BTreeMap<String, f32> = BTreeMap::new();
+    for line_res in reader.lines() {
+        let line = line_res?;
+        let Some((_, mount, used_pct)) = parse_disk_line(&line) else {
+            continue;
+        };
+        if let Some(slot) = latest.get_mut(mount) {
+            *slot = used_pct;
         } else {
-            match temp_s.parse::<f32>() {
-                Ok(t) if t.is_finite() => Some(t),
-                _ => continue,
-            }
-        };
-
-        points.push(RawPoint {
-            timestamp,
-            cpu_pct,
-            mem_pct,
-            temp_c,
-            net_ok: net_raw != 0,
-            interval_ms,
-        });
+            latest.insert(mount.to_string(), used_pct);
+        }
     }
 
-    Ok(points)
+    Ok(latest)
 }
 
-/// Parses a `disks-YYYY-MM-DD.log` file.
-pub fn parse_disks_log(path: &Path) -> io::Result<Vec<DiskPoint>> {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
-    };
-
-    let mut points = Vec::new();
-    for line_res in BufReader::new(file).lines() {
-        let line = line_res?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let Some((ts_s, rest)) = trimmed.split_once(char::is_whitespace) else {
-            continue;
-        };
-        let Some((mount_raw, used_s)) = rest.trim_start().rsplit_once(char::is_whitespace) else {
-            continue;
-        };
-
-        let (Ok(timestamp), Ok(used_pct)) = (ts_s.parse::<u64>(), used_s.trim().parse::<f32>())
-        else {
-            continue;
-        };
-        if !used_pct.is_finite() {
-            continue;
-        }
-
-        points.push(DiskPoint {
-            timestamp,
-            mount: mount_raw.trim().to_string(),
-            used_pct,
-        });
-    }
-
-    Ok(points)
-}
-
-/// Downsamples `points` to at most `max_points` buckets while preserving any network outage (`net_ok == false`).
 pub fn downsample_raw(points: &[RawPoint], max_points: usize) -> Vec<RawPoint> {
     if max_points == 0 || points.len() <= max_points {
         return points.to_vec();
@@ -327,7 +243,7 @@ mod tests {
     use time::macros::date;
 
     #[test]
-    fn test_scan_log_dir_orders_dates_and_handles_missing_dir() -> io::Result<()> {
+    fn test_scan_log_dir_orders_dates_and_handles_missing_dir() -> Result<()> {
         let missing = Path::new("/tmp/definitely_nonexistent_brother_dir_12345");
         let empty_inv = scan_log_dir(missing)?;
         assert_eq!(empty_inv, LogInventory::default());
@@ -351,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_history_handles_missing_temp_and_net_dashes() -> io::Result<()> {
+    fn test_parse_history_handles_missing_temp_and_net_dashes() -> Result<()> {
         let dir = TestTempDir::new("history")?;
         let path = dir.path().join("history.log");
         fs::write(
@@ -389,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_raw_and_downsample_preserves_outage() -> io::Result<()> {
+    fn test_parse_raw_and_downsample_preserves_outage() -> Result<()> {
         let dir = TestTempDir::new("raw")?;
         let path = dir.path().join("raw-2026-11-10.log");
         fs::write(
@@ -418,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_disks_log() -> io::Result<()> {
+    fn test_parse_disks_log() -> Result<()> {
         let dir = TestTempDir::new("disks")?;
         let path = dir.path().join("disks-2026-11-10.log");
         fs::write(

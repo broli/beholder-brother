@@ -1,14 +1,17 @@
-use crate::brother::html::{self, DashboardData, HistoryView, LiveSummary, RetainedDayView};
+use crate::Result;
+use crate::brother::html::{
+    self, DashboardData, HistoryView, LiveSummary, MetricChartSet, RetainedDayView,
+};
 use crate::brother::logs::{
-    FileStamp, RawPoint, downsample_raw, parse_disks_log, parse_history, parse_raw_log,
+    FileStamp, RawPoint, downsample_raw, parse_history, parse_latest_disks, parse_raw_log,
     scan_log_dir,
 };
 use crate::brother::svg::{
     render_disk_bars, render_history_band_chart, render_net_down_chart, render_raw_line_chart,
 };
 use std::collections::{BTreeMap, HashSet};
-use std::io;
 use std::path::Path;
+use std::sync::Arc;
 use time::Date;
 
 const MAX_RAW_SVG_POINTS: usize = 600;
@@ -17,91 +20,188 @@ const SECS_24H: u64 = 24 * 3600;
 
 struct CachedHistory {
     stamp: FileStamp,
-    view: HistoryView,
+    view: Arc<HistoryView>,
 }
 
 struct CachedDay {
     stamp: FileStamp,
-    view: RetainedDayView,
+    view: Arc<RetainedDayView>,
+}
+
+#[derive(PartialEq, Eq)]
+struct PageCacheKey {
+    today: Date,
+    scale_bits: u32,
+    history_stamp: Option<FileStamp>,
+    live_raw_stamps: Vec<(Date, Option<FileStamp>)>,
+    latest_disk_stamp: Option<(Date, Option<FileStamp>)>,
+    retained_stamps: Vec<(Date, Option<FileStamp>)>,
+}
+
+impl PageCacheKey {
+    fn matches(
+        &self,
+        today: Date,
+        scale_bits: u32,
+        history_stamp: Option<FileStamp>,
+        live_raw_stamps: &[(Date, Option<FileStamp>)],
+        latest_disk_stamp: Option<(Date, Option<FileStamp>)>,
+        retained_files: &[(Date, &Path, Option<FileStamp>)],
+    ) -> bool {
+        self.today == today
+            && self.scale_bits == scale_bits
+            && self.history_stamp == history_stamp
+            && self.latest_disk_stamp == latest_disk_stamp
+            && self.live_raw_stamps == live_raw_stamps
+            && self
+                .retained_stamps
+                .iter()
+                .copied()
+                .eq(retained_files.iter().map(|(d, _, s)| (*d, *s)))
+    }
+}
+
+struct CachedPage {
+    key: PageCacheKey,
+    html: Arc<str>,
 }
 
 #[derive(Default)]
 pub struct DashboardCache {
     history: Option<CachedHistory>,
     retained_days: BTreeMap<Date, CachedDay>,
+    last_page: Option<CachedPage>,
 }
 
 impl DashboardCache {
-    /// Builds the full 3-tab HTML dashboard, reusing cached SVGs for immutable past days
-    /// and unchanged `history.log` unless `force` is true.
     pub fn build_dashboard(
         &mut self,
         log_dir: &Path,
         today: Date,
         force: bool,
         scale: f32,
-    ) -> io::Result<String> {
+    ) -> Result<Arc<str>> {
         if force {
             self.history = None;
             self.retained_days.clear();
+            self.last_page = None;
         }
 
         let inventory = scan_log_dir(log_dir)?;
 
-        let history = self.load_history(inventory.history_path.as_deref())?;
+        let history_stamp = inventory
+            .history_path
+            .as_deref()
+            .map(FileStamp::from_path)
+            .transpose()?
+            .flatten();
 
-        // Evict dates that beholder has retired so memory stays bounded.
-        let active_dates: HashSet<Date> = inventory.raw_days.iter().map(|(d, _)| *d).collect();
-        self.retained_days.retain(|d, _| active_dates.contains(d));
+        let live_raw_start = inventory.raw_days.len().saturating_sub(2);
+        let live_raw_stamps = inventory.raw_days[live_raw_start..]
+            .iter()
+            .map(|(date, path)| FileStamp::from_path(path).map(|s| (*date, s)))
+            .collect::<Result<Vec<_>>>()?;
 
-        let mut retained = Vec::new();
+        let latest_disk_stamp = inventory
+            .disk_days
+            .last()
+            .map(|(date, path)| FileStamp::from_path(path).map(|s| (*date, s)))
+            .transpose()?;
+
+        let mut retained_files = Vec::new();
         for (date, path) in &inventory.raw_days {
             if *date < today {
-                let day_view = self.load_retained_day(*date, path)?;
-                retained.push(day_view);
+                retained_files.push((*date, path.as_path(), FileStamp::from_path(path)?));
             }
         }
 
-        let live = build_live_summary(&inventory.raw_days, &inventory.disk_days)?;
+        let scale_bits = scale.to_bits();
+        if !force
+            && let Some(cached) = &self.last_page
+            && cached.key.matches(
+                today,
+                scale_bits,
+                history_stamp,
+                &live_raw_stamps,
+                latest_disk_stamp,
+                &retained_files,
+            )
+        {
+            return Ok(Arc::clone(&cached.html));
+        }
+
+        let retained_stamps =
+            (!force).then(|| retained_files.iter().map(|(d, _, s)| (*d, *s)).collect());
+
+        let history = self.load_history(inventory.history_path.as_deref(), history_stamp)?;
+
+        let active_dates: HashSet<Date> = inventory.raw_days.iter().map(|(d, _)| *d).collect();
+        self.retained_days.retain(|d, _| active_dates.contains(d));
+
+        let mut retained = Vec::with_capacity(retained_files.len());
+        for (date, path, stamp) in retained_files {
+            retained.push(self.load_retained_day(date, path, stamp)?);
+        }
+
+        let live = build_live_summary(&inventory.raw_days[live_raw_start..], &inventory.disk_days)?;
+        let log_dir_display = log_dir.display().to_string();
 
         let data = DashboardData {
-            log_dir_display: log_dir.display().to_string(),
+            log_dir_display: &log_dir_display,
             scale,
-            live,
-            retained,
-            history,
+            live: &live,
+            retained: &retained,
+            history: &history,
         };
-        Ok(html::render_page(&data))
+        let html: Arc<str> = Arc::from(html::render_page(&data));
+        if let Some(retained_stamps) = retained_stamps {
+            self.last_page = Some(CachedPage {
+                key: PageCacheKey {
+                    today,
+                    scale_bits,
+                    history_stamp,
+                    live_raw_stamps,
+                    latest_disk_stamp,
+                    retained_stamps,
+                },
+                html: Arc::clone(&html),
+            });
+        }
+        Ok(html)
     }
 
-    fn load_history(&mut self, history_path: Option<&Path>) -> io::Result<HistoryView> {
-        let Some(path) = history_path else {
+    fn load_history(
+        &mut self,
+        history_path: Option<&Path>,
+        stamp: Option<FileStamp>,
+    ) -> Result<Arc<HistoryView>> {
+        let (Some(path), Some(stamp)) = (history_path, stamp) else {
             self.history = None;
-            return Ok(render_history_view(&[]));
-        };
-
-        let Some(stamp) = FileStamp::from_path(path)? else {
-            self.history = None;
-            return Ok(render_history_view(&[]));
+            return Ok(Arc::new(render_history_view(&[])));
         };
 
         if let Some(cached) = &self.history
             && cached.stamp == stamp
         {
-            return Ok(cached.view.clone());
+            return Ok(Arc::clone(&cached.view));
         }
 
         let days = parse_history(path)?;
-        let view = render_history_view(&days);
+        let view = Arc::new(render_history_view(&days));
         self.history = Some(CachedHistory {
             stamp,
-            view: view.clone(),
+            view: Arc::clone(&view),
         });
         Ok(view)
     }
 
-    fn load_retained_day(&mut self, date: Date, path: &Path) -> io::Result<RetainedDayView> {
-        let stamp = FileStamp::from_path(path)?.unwrap_or(FileStamp {
+    fn load_retained_day(
+        &mut self,
+        date: Date,
+        path: &Path,
+        stamp: Option<FileStamp>,
+    ) -> Result<Arc<RetainedDayView>> {
+        let stamp = stamp.unwrap_or(FileStamp {
             modified: None,
             len: 0,
         });
@@ -109,28 +209,26 @@ impl DashboardCache {
         if let Some(cached) = self.retained_days.get(&date)
             && cached.stamp == stamp
         {
-            return Ok(cached.view.clone());
+            return Ok(Arc::clone(&cached.view));
         }
 
         let raw = parse_raw_log(path)?;
         let samples = raw.len();
         let outages = raw.iter().filter(|p| !p.net_ok).count();
         let downsampled = downsample_raw(&raw, MAX_RAW_SVG_POINTS);
-        let (cpu_svg, mem_svg, temp_svg) = render_raw_trio(&downsampled, "Daily");
+        let charts = render_raw_trio(&downsampled, "Daily");
 
-        let view = RetainedDayView {
+        let view = Arc::new(RetainedDayView {
             date_label: date.to_string(),
             samples,
             outages,
-            cpu_svg,
-            mem_svg,
-            temp_svg,
-        };
+            charts,
+        });
         self.retained_days.insert(
             date,
             CachedDay {
                 stamp,
-                view: view.clone(),
+                view: Arc::clone(&view),
             },
         );
         Ok(view)
@@ -143,7 +241,7 @@ fn render_history_view(days: &[crate::brother::logs::HistoryDay]) -> HistoryView
         cpu_svg: render_history_band_chart(
             "CPU Load History (%)",
             "%",
-            "--blue",
+            "--series-cpu",
             days,
             |d| d.cpu.as_ref(),
             Some((0.0, 100.0)),
@@ -151,7 +249,7 @@ fn render_history_view(days: &[crate::brother::logs::HistoryDay]) -> HistoryView
         mem_svg: render_history_band_chart(
             "Memory Usage History (%)",
             "%",
-            "--mauve",
+            "--series-mem",
             days,
             |d| d.mem.as_ref(),
             Some((0.0, 100.0)),
@@ -159,7 +257,7 @@ fn render_history_view(days: &[crate::brother::logs::HistoryDay]) -> HistoryView
         temp_svg: render_history_band_chart(
             "Temperature History (°C)",
             "°C",
-            "--peach",
+            "--series-temp",
             days,
             |d| d.temp.as_ref(),
             None,
@@ -168,43 +266,41 @@ fn render_history_view(days: &[crate::brother::logs::HistoryDay]) -> HistoryView
     }
 }
 
-fn render_raw_trio(points: &[RawPoint], prefix: &str) -> (String, String, String) {
-    (
-        render_raw_line_chart(
+fn render_raw_trio(points: &[RawPoint], prefix: &str) -> MetricChartSet {
+    MetricChartSet {
+        cpu_svg: render_raw_line_chart(
             &format!("{prefix} CPU Load %"),
             "%",
-            "--blue",
+            "--series-cpu",
             points,
             |p| Some(p.cpu_pct),
             Some((0.0, 100.0)),
         ),
-        render_raw_line_chart(
+        mem_svg: render_raw_line_chart(
             &format!("{prefix} Memory Usage %"),
             "%",
-            "--mauve",
+            "--series-mem",
             points,
             |p| Some(p.mem_pct),
             Some((0.0, 100.0)),
         ),
-        render_raw_line_chart(
+        temp_svg: render_raw_line_chart(
             &format!("{prefix} Temperature °C"),
             "°C",
-            "--peach",
+            "--series-temp",
             points,
             |p| p.temp_c,
             None,
         ),
-    )
+    }
 }
 
 fn build_live_summary(
-    raw_days: &[(Date, std::path::PathBuf)],
+    recent_raw_days: &[(Date, std::path::PathBuf)],
     disk_days: &[(Date, std::path::PathBuf)],
-) -> io::Result<LiveSummary> {
-    // Load up to the two most recent raw files so a 24h window works across midnight.
+) -> Result<LiveSummary> {
     let mut live_points = Vec::new();
-    let start_idx = raw_days.len().saturating_sub(2);
-    for (_, path) in &raw_days[start_idx..] {
+    for (_, path) in recent_raw_days {
         live_points.extend(parse_raw_log(path)?);
     }
 
@@ -214,22 +310,21 @@ fn build_live_summary(
     let idx_12h = live_points.partition_point(|p| p.timestamp < latest_ts.saturating_sub(SECS_12H));
     let idx_24h = live_points.partition_point(|p| p.timestamp < latest_ts.saturating_sub(SECS_24H));
 
-    let (cpu_12h_svg, mem_12h_svg, temp_12h_svg) = render_raw_trio(
+    let window_12h = render_raw_trio(
         &downsample_raw(&live_points[idx_12h..], MAX_RAW_SVG_POINTS),
         "12h",
     );
-    let (cpu_24h_svg, mem_24h_svg, temp_24h_svg) = render_raw_trio(
+    let window_24h = render_raw_trio(
         &downsample_raw(&live_points[idx_24h..], MAX_RAW_SVG_POINTS),
         "24h",
     );
 
     let disk_svg = if let Some((_, disk_path)) = disk_days.last() {
-        let disk_pts = parse_disks_log(disk_path)?;
-        let mut latest_mounts = BTreeMap::new();
-        for p in &disk_pts {
-            latest_mounts.insert(p.mount.as_str(), p.used_pct);
-        }
-        let refs: Vec<(&str, f32)> = latest_mounts.into_iter().collect();
+        let latest_mounts = parse_latest_disks(disk_path)?;
+        let refs: Vec<(&str, f32)> = latest_mounts
+            .iter()
+            .map(|(m, pct)| (m.as_str(), *pct))
+            .collect();
         render_disk_bars(&refs)
     } else {
         render_disk_bars(&[])
@@ -241,12 +336,8 @@ fn build_live_summary(
         latest_temp: latest.and_then(|p| p.temp_c),
         latest_net_ok: latest.map(|p| p.net_ok),
         disk_svg,
-        cpu_12h_svg,
-        mem_12h_svg,
-        temp_12h_svg,
-        cpu_24h_svg,
-        mem_24h_svg,
-        temp_24h_svg,
+        window_12h,
+        window_24h,
     })
 }
 
@@ -258,7 +349,7 @@ mod tests {
     use time::macros::date;
 
     #[test]
-    fn test_cache_builds_evicts_and_respects_force() -> io::Result<()> {
+    fn test_cache_builds_evicts_and_respects_force() -> Result<()> {
         let dir = TestTempDir::new("cache")?;
         let past_raw = dir.path().join("raw-2026-11-10.log");
         let today_raw = dir.path().join("raw-2026-11-19.log");
@@ -270,6 +361,10 @@ mod tests {
         assert!(html.contains("Retained Raw (1d)"));
         assert!(html.contains("25.0%"));
         assert_eq!(cache.retained_days.len(), 1);
+        assert!(cache.last_page.is_some());
+
+        let html_cached = cache.build_dashboard(dir.path(), date!(2026 - 11 - 19), false, 1.0)?;
+        assert_eq!(html, html_cached);
 
         // Removing the retired past file should evict it from the cache on next build.
         fs::remove_file(&past_raw)?;
@@ -277,10 +372,10 @@ mod tests {
         assert!(html2.contains("Retained Raw (0d)"));
         assert_eq!(cache.retained_days.len(), 0);
 
-        // Force rebuild on empty history still succeeds cleanly.
         let html3 = cache.build_dashboard(dir.path(), date!(2026 - 11 - 19), true, 1.5)?;
-        assert!(html3.contains("<!doctype html>"));
+        assert!(html3.contains("<!DOCTYPE html>"));
         assert!(html3.contains("--scale: 1.50"));
+        assert!(cache.last_page.is_none());
         Ok(())
     }
 }
