@@ -1,6 +1,8 @@
 # beholder-brother
 
-Lightweight system telemetry daemon (`beholder`) and read-only visualazer (`brother`) for low-power Linux boxes. Plain-text logs, zero databases, zero frontend build steps. As little dependencies as possible. 
+The name of this project is a wordplay on the old bb, but it does not work like it 
+
+Its a lightweight system telemetry daemon (`beholder`) and read-only visualizer (`brother`) for low-power Linux boxes. Plain-text logs, zero databases, zero frontend build steps. As little dependencies as possible. 
 
 ## Binaries
 
