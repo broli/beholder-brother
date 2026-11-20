@@ -54,6 +54,21 @@ release-all:
     just release-target aarch64-unknown-linux-musl
     just release-target armv7-unknown-linux-musleabihf
 
+# Build and package .tar.gz, .deb, and .rpm artifacts for all 4 targets into dist/
+package-all: release-all
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver=$(cargo metadata --no-deps --format-version 1 | python3 -c "import sys, json; print(json.load(sys.stdin)['packages'][0]['version'])")
+    rpm_ver="${ver//-/\~}"
+    rm -rf dist && mkdir -p dist
+    for t in x86_64-unknown-linux-musl i686-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf; do
+        tar -C "target/$t/release" -czf "dist/beholder-brother-v${ver}-${t}.tar.gz" beholder brother
+        cargo deb --no-build --no-strip --target "$t" --output dist/
+        cargo generate-rpm --target "$t" --auto-req disabled -s "version = \"${rpm_ver}\"" --output dist/
+    done
+    (cd dist && sha256sum *.tar.gz *.deb *.rpm > SHA256SUMS)
+    ls -lh dist/
+
 # Clean cargo artifacts and /tmp/test/
 clean:
     cargo clean

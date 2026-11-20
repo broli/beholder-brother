@@ -2,6 +2,10 @@
 name = "beholder-brother"
 version = "0.2.0-alpha"
 edition = "2024"
+authors = ["Carlos Ferrabone <152314+broli@users.noreply.github.com>"]
+description = "Lightweight Linux system telemetry daemon and HTML/SVG log viewer"
+license = "MIT"
+repository = "https://github.com/broli/beholder-brother"
 default-run = "beholder"
 
 [[bin]]
@@ -23,3 +27,15 @@ time = { version = "0.3", default-features = false, features = [
     "macros",
     "parsing",
 ] }
+
+[package.metadata.deb]
+depends = ""
+
+[profile.release]
+strip = true
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/beholder", dest = "/usr/bin/beholder", mode = "755" },
+    { source = "target/release/brother", dest = "/usr/bin/brother", mode = "755" },
+]
