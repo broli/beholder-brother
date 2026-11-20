@@ -216,7 +216,8 @@ impl DashboardCache {
         let samples = raw.len();
         let outages = raw.iter().filter(|p| !p.net_ok).count();
         let downsampled = downsample_raw(&raw, MAX_RAW_SVG_POINTS);
-        let charts = render_raw_trio(&downsampled, "Daily");
+        let day_start = u64::try_from(date.midnight().assume_utc().unix_timestamp()).unwrap_or(0);
+        let charts = render_raw_trio(&downsampled, "Daily", (day_start, day_start + 86_400));
 
         let view = Arc::new(RetainedDayView {
             date_label: date.to_string(),
@@ -266,7 +267,7 @@ fn render_history_view(days: &[crate::brother::logs::HistoryDay]) -> HistoryView
     }
 }
 
-fn render_raw_trio(points: &[RawPoint], prefix: &str) -> MetricChartSet {
+fn render_raw_trio(points: &[RawPoint], prefix: &str, x_bounds: (u64, u64)) -> MetricChartSet {
     MetricChartSet {
         cpu_svg: render_raw_line_chart(
             &format!("{prefix} CPU Load %"),
@@ -275,6 +276,7 @@ fn render_raw_trio(points: &[RawPoint], prefix: &str) -> MetricChartSet {
             points,
             |p| Some(p.cpu_pct),
             Some((0.0, 100.0)),
+            x_bounds,
         ),
         mem_svg: render_raw_line_chart(
             &format!("{prefix} Memory Usage %"),
@@ -283,6 +285,7 @@ fn render_raw_trio(points: &[RawPoint], prefix: &str) -> MetricChartSet {
             points,
             |p| Some(p.mem_pct),
             Some((0.0, 100.0)),
+            x_bounds,
         ),
         temp_svg: render_raw_line_chart(
             &format!("{prefix} Temperature °C"),
@@ -291,6 +294,7 @@ fn render_raw_trio(points: &[RawPoint], prefix: &str) -> MetricChartSet {
             points,
             |p| p.temp_c,
             None,
+            x_bounds,
         ),
     }
 }
@@ -313,10 +317,12 @@ fn build_live_summary(
     let window_12h = render_raw_trio(
         &downsample_raw(&live_points[idx_12h..], MAX_RAW_SVG_POINTS),
         "12h",
+        (latest_ts.saturating_sub(SECS_12H), latest_ts),
     );
     let window_24h = render_raw_trio(
         &downsample_raw(&live_points[idx_24h..], MAX_RAW_SVG_POINTS),
         "24h",
+        (latest_ts.saturating_sub(SECS_24H), latest_ts),
     );
 
     let disk_svg = if let Some((_, disk_path)) = disk_days.last() {

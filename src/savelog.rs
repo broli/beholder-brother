@@ -2,11 +2,10 @@ use crate::sense::{DiskSample, Sample};
 use crate::{Result, timestamp_to_utc_date};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use time::Date;
 
-const BUFFER_BYTES: usize = 4096;
 const RAW_HEADER: &str = "# timestamp cpu_pct mem_pct temp_c net_ok interval_ms";
 const DISKS_HEADER: &str = "# timestamp mount used_pct";
 
@@ -14,7 +13,7 @@ struct LogStream {
     prefix: &'static str,
     header: &'static str,
     active_date: Option<Date>,
-    writer: Option<BufWriter<File>>,
+    file: Option<File>,
 }
 
 impl LogStream {
@@ -23,7 +22,7 @@ impl LogStream {
             prefix,
             header,
             active_date: None,
-            writer: None,
+            file: None,
         }
     }
 
@@ -34,30 +33,29 @@ impl LogStream {
         line: &str,
         flush_each: bool,
     ) -> Result<()> {
-        let writer = if self.active_date == Some(date)
-            && let Some(writer) = self.writer.as_mut()
+        let file = if self.active_date == Some(date)
+            && let Some(file) = self.file.as_mut()
         {
-            writer
+            file
         } else {
-            if let Some(prev) = self.writer.as_mut() {
-                prev.flush()?;
+            if let Some(prev) = self.file.as_mut() {
+                prev.sync_data()?;
             }
             let file = open_daily_log(log_dir, self.prefix, date, self.header)?;
             self.active_date = Some(date);
-            self.writer
-                .insert(BufWriter::with_capacity(BUFFER_BYTES, file))
+            self.file.insert(file)
         };
 
-        writer.write_all(line.as_bytes())?;
+        file.write_all(line.as_bytes())?;
         if flush_each {
-            writer.flush()?;
+            file.sync_data()?;
         }
         Ok(())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if let Some(writer) = self.writer.as_mut() {
-            writer.flush()?;
+        if let Some(file) = self.file.as_mut() {
+            file.sync_data()?;
         }
         Ok(())
     }
