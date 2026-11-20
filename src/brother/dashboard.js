@@ -9,8 +9,13 @@ for (const tablist of document.querySelectorAll('[role=tablist]')) {
       tab.tabIndex = selected ? 0 : -1;
       const panel = panels[idx];
       if (!panel) return;
-      if (selected) panel.removeAttribute('hidden');
-      else panel.setAttribute('hidden', 'until-found');
+      if (selected) {
+        panel.removeAttribute('hidden');
+        if (panel.hasAttribute('data-static-panel')) panel.tabIndex = 0;
+      } else {
+        panel.setAttribute('hidden', 'until-found');
+        panel.removeAttribute('tabindex');
+      }
     });
     if (focusTab) {
       nextTab.focus();

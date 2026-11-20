@@ -112,7 +112,7 @@ pub fn render_page(data: &DashboardData<'_>) -> String {
         <button type="button" role="tab" id="win-btn-24h" data-panel="win-24h" aria-selected="false" tabindex="-1">Last 24h</button>
       </div>
     </div>
-    <div id="win-12h" role="tabpanel" aria-labelledby="win-btn-12h">
+    <div id="win-12h" role="tabpanel" aria-labelledby="win-btn-12h" tabindex="0" data-static-panel>
       <div class="chart-grid">"#,
         dir = escape_xml(data.log_dir_display),
         ret_count = data.retained.len(),
@@ -126,7 +126,7 @@ pub fn render_page(data: &DashboardData<'_>) -> String {
     html.push_str(
         r#"      </div>
     </div>
-    <div id="win-24h" role="tabpanel" aria-labelledby="win-btn-24h" hidden="until-found">
+    <div id="win-24h" role="tabpanel" aria-labelledby="win-btn-24h" hidden="until-found" data-static-panel>
       <div class="chart-grid">"#,
     );
     write_chart_trio(&mut html, &data.live.window_24h);
@@ -171,7 +171,7 @@ pub fn render_page(data: &DashboardData<'_>) -> String {
         r#"  </div>
 </div>
 
-<div id="panel-history" role="tabpanel" aria-labelledby="tab-btn-history" hidden="until-found">
+<div id="panel-history" role="tabpanel" aria-labelledby="tab-btn-history" hidden="until-found" data-static-panel>
   <div class="panel-body">
     <div class="chart-grid">
       {hcpu}{hmem}{htemp}{hnet}
