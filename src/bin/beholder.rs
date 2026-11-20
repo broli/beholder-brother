@@ -90,7 +90,7 @@ Options:
     -A, --archive <TYPE>        none | gzip (default) | plain
     -n, --network <ADDR>        TCP address to probe for connectivity (default: 1.1.1.1:53)
     -m, --mount <PATH>          Mount point to track; repeatable (default: /)
-    -F, --flush                 Flush every sample immediately to disk (disables 4 KB write buffer)
+    -F, --flush                 Flush every sample immediately to disk (Instead of waiting for the FS to flush). Usefull if server dies and want to see data up to the last second
 "
     );
 }

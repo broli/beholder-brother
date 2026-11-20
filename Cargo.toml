@@ -1,6 +1,6 @@
 [package]
 name = "beholder-brother"
-version = "0.2.0-alpha"
+version = "0.2.1-alpha"
 edition = "2024"
 authors = ["Carlos Ferrabone <152314+broli@users.noreply.github.com>"]
 description = "Lightweight Linux system telemetry daemon and HTML/SVG log viewer"

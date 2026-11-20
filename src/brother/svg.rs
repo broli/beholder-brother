@@ -33,6 +33,15 @@ fn map_x(idx: usize, len: usize) -> f32 {
     }
 }
 
+fn map_x_time(ts: u64, t_min: u64, t_max: u64) -> f32 {
+    if t_max <= t_min {
+        return PAD_LEFT + PLOT_W / 2.0;
+    }
+    let span = (t_max - t_min) as f32;
+    let normalized = (ts.saturating_sub(t_min) as f32 / span).clamp(0.0, 1.0);
+    PAD_LEFT + normalized * PLOT_W
+}
+
 fn map_y(val: f32, y_min: f32, y_max: f32) -> f32 {
     let span = (y_max - y_min).max(0.001);
     let norm = if val.is_finite() {
@@ -154,9 +163,11 @@ pub fn render_raw_line_chart(
     points: &[RawPoint],
     extract: fn(&RawPoint) -> Option<f32>,
     fixed_bounds: Option<(f32, f32)>,
+    x_bounds: (u64, u64),
 ) -> String {
     let mut buf = String::with_capacity(2048);
     start_svg_card(&mut buf, title);
+    let (t_min, t_max) = x_bounds;
 
     let has_values = points.iter().any(|p| extract(p).is_some());
     if points.is_empty() || !has_values {
@@ -170,9 +181,9 @@ pub fn render_raw_line_chart(
     let mut segment = String::new();
     let mut first = None;
     let mut count = 0usize;
-    for (i, p) in points.iter().enumerate() {
+    for p in points {
         if let Some(val) = extract(p) {
-            let x = map_x(i, points.len());
+            let x = map_x_time(p.timestamp, t_min, t_max);
             let y = map_y(val, y_min, y_max);
             if count == 0 {
                 first = Some((x, y, val));
@@ -202,9 +213,9 @@ pub fn render_raw_line_chart(
     );
 
     let base_y = PAD_TOP + PLOT_H;
-    for (i, p) in points.iter().enumerate() {
+    for p in points {
         if !p.net_ok {
-            let x = map_x(i, points.len());
+            let x = map_x_time(p.timestamp, t_min, t_max);
             let _ = writeln!(
                 buf,
                 r#"  <line x1="{x:.1}" y1="{y1:.1}" x2="{x:.1}" y2="{base_y:.1}" stroke="var(--status-err)" stroke-width="2"><title>Network down @ {ts}</title></line>"#,
@@ -467,6 +478,7 @@ mod tests {
             &[],
             |p| Some(p.cpu_pct),
             Some((0.0, 100.0)),
+            (0, 100),
         );
         assert!(empty.contains("viewBox=\"0 0 800 220\""));
         assert!(empty.contains("No samples available"));
@@ -479,6 +491,7 @@ mod tests {
             &[pt(1000, 10.0, Some(48.5), false)],
             |p| p.temp_c,
             None,
+            (100, 100),
         );
         assert!(single.contains("<circle"));
         assert!(single.contains("Network down"));
@@ -500,6 +513,7 @@ mod tests {
             &pts,
             |p| p.temp_c,
             None,
+            (100, 400),
         );
         assert!(svg.contains("Temp &lt;SoC&gt;"));
         assert_eq!(svg.matches("<polyline").count(), 1);
