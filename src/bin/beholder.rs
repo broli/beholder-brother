@@ -1,39 +1,53 @@
 #![forbid(unsafe_code)]
 
-use beholder_brother::{ArchiveType, Config, Error, Result, return_today, rollout, savelog, sense};
+use beholder_brother::{ArchiveType, Config, Error, Result, rollout, savelog, sense, today_utc};
 use lexopt::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 fn main() -> Result<()> {
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-
-    ctrlc::set_handler(move || {
-        eprintln!("\nInterrupt received, shutting down...");
-        r.store(false, Ordering::SeqCst);
-    })?;
-
     let Some(config) = parse_args()? else {
         return Ok(());
     };
 
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    let main_thread = std::thread::current();
+
+    ctrlc::set_handler(move || {
+        eprintln!("\nInterrupt received, shutting down...");
+        r.store(false, Ordering::Relaxed);
+        main_thread.unpark();
+    })?;
+
     let mut prev_cpu = sense::PreviousCpuTick::default();
+    sense::prime_cpu(&mut prev_cpu)?;
+    sleep_interruptible(
+        &running,
+        Duration::from_millis(config.interval_ms.clamp(50, 200)),
+    );
+
     let mut logs = savelog::DailyLogs::new(config.log_dir.clone(), config.flush_each_sample);
     let mut tick: u64 = 0;
     let mut last_rotate_day = None;
 
-    while running.load(Ordering::SeqCst) {
-        let sample = sense::sense(&config, &mut prev_cpu)?;
-        logs.append_sample(&sample, config.interval_ms)?;
-
-        if tick == 0 {
-            let disk_samples = sense::sense_disks(&config)?;
-            logs.append_disks(sample.timestamp, &disk_samples)?;
+    while running.load(Ordering::Relaxed) {
+        match sense::sense(&config, &mut prev_cpu) {
+            Ok(sample) => {
+                logs.append_sample(&sample, config.interval_ms)?;
+                if tick == 0 {
+                    match sense::sense_disks(&config) {
+                        Ok(disk_samples) => logs.append_disks(sample.timestamp, &disk_samples)?,
+                        Err(err) => eprintln!("Disk sense error: {err}"),
+                    }
+                }
+            }
+            Err(err) => eprintln!("Sample error: {err}"),
         }
 
-        let today = return_today()?;
+        let today = today_utc()?;
         if last_rotate_day != Some(today) {
             logs.flush()?;
             if let Err(err) = rollout::rollup_and_retire(&config, &today) {
@@ -43,12 +57,23 @@ fn main() -> Result<()> {
         }
 
         tick = (tick + 1) % 60;
-        std::thread::sleep(std::time::Duration::from_millis(config.interval_ms));
+        sleep_interruptible(&running, Duration::from_millis(config.interval_ms));
     }
 
     logs.flush()?;
     println!("\nDaemon stopped cleanly.");
     Ok(())
+}
+
+fn sleep_interruptible(running: &AtomicBool, duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while running.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        std::thread::park_timeout(deadline - now);
+    }
 }
 
 fn print_usage() {
@@ -90,7 +115,13 @@ fn parse_args() -> Result<Option<Config>> {
                 return Ok(None);
             }
             Short('i') | Long("interval") => {
-                cfg.interval_ms = parser.value()?.parse()?;
+                let ms: u64 = parser.value()?.parse()?;
+                if ms == 0 {
+                    return Err(Error::InvalidArg(
+                        "interval must be greater than 0 ms".into(),
+                    ));
+                }
+                cfg.interval_ms = ms;
             }
             Short('l') | Long("log-dir") => {
                 cfg.log_dir = PathBuf::from(parser.value()?);

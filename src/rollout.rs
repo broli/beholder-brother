@@ -22,15 +22,6 @@ enum LogKind {
     Disks,
 }
 
-impl LogKind {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Raw => "raw",
-            Self::Disks => "disks",
-        }
-    }
-}
-
 #[derive(Debug)]
 struct DatedLog {
     date: Date,
@@ -67,7 +58,7 @@ pub fn rollup_and_retire(config: &Config, today: &Date) -> Result<()> {
                 Some(rollup) => {
                     append_rollup_to_history(&history_path, &rollup)?;
                     rolled_dates.insert(log.date);
-                    crate::print_debug(&format!("Rolled up {} into {}", log.date, HISTORY_FILE));
+                    crate::debug_log!("Rolled up {} into {}", log.date, HISTORY_FILE);
                 }
                 None => {
                     empty_raw_dates.insert(log.date);
@@ -92,49 +83,37 @@ pub fn rollup_and_retire(config: &Config, today: &Date) -> Result<()> {
         if let Err(err) = retire_log(&log.path, &config.archive_dir, &config.archive_type) {
             eprintln!("Warning: failed to retire {}: {err}", log.path.display());
         } else {
-            crate::print_debug(&format!("Retired {}", log.path.display()));
+            crate::debug_log!("Retired {}", log.path.display());
         }
     }
 
     Ok(())
 }
 
-fn parse_log_date(filename: &str, kind: LogKind) -> Option<Date> {
-    crate::parse_prefixed_log_date(filename, kind.as_str())
-}
-
 fn collect_past_logs(log_dir: &Path, today: Date) -> io::Result<Vec<DatedLog>> {
     fs::create_dir_all(log_dir)?;
+    let inventory = crate::scan_log_dir(log_dir)?;
 
-    let mut logs: Vec<DatedLog> = Vec::new();
-    for entry in fs::read_dir(log_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let file_name = entry.file_name();
-        let Some(filename) = file_name.to_str() else {
-            continue;
-        };
-        let log_kind = if filename.starts_with("raw") {
-            LogKind::Raw
-        } else if filename.starts_with("disks") {
-            LogKind::Disks
-        } else {
-            continue;
-        };
-        let Some(date_of_log) = parse_log_date(filename, log_kind) else {
-            continue;
-        };
-        if date_of_log >= today {
-            continue;
-        }
-        logs.push(DatedLog {
-            date: date_of_log,
-            path: entry.path(),
-            kind: log_kind,
-        });
-    }
+    let mut logs: Vec<DatedLog> = inventory
+        .raw_days
+        .into_iter()
+        .map(|(date, path)| DatedLog {
+            date,
+            path,
+            kind: LogKind::Raw,
+        })
+        .chain(
+            inventory
+                .disk_days
+                .into_iter()
+                .map(|(date, path)| DatedLog {
+                    date,
+                    path,
+                    kind: LogKind::Disks,
+                }),
+        )
+        .filter(|log| log.date < today)
+        .collect();
     logs.sort_by_key(|log| log.date);
     Ok(logs)
 }
@@ -144,8 +123,7 @@ fn summarize_raw_log(
     date: Date,
     fallback_interval_ms: u64,
 ) -> io::Result<Option<DailyRollup>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::new(File::open(path)?);
 
     let mut cpus = Vec::new();
     let mut mems = Vec::new();
@@ -158,43 +136,17 @@ fn summarize_raw_log(
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-
-        let mut cols = trimmed.split_whitespace();
-        let Some(_ts) = cols.next() else {
-            continue;
-        };
-        let (Some(cpu_str), Some(mem_str), Some(temp_str), Some(net_str)) =
-            (cols.next(), cols.next(), cols.next(), cols.next())
-        else {
+        let Some(pt) = crate::parse_raw_line(trimmed, fallback_interval_ms) else {
             continue;
         };
 
-        let (Ok(cpu), Ok(mem), Ok(net)) = (
-            cpu_str.parse::<f32>(),
-            mem_str.parse::<f32>(),
-            net_str.parse::<u8>(),
-        ) else {
-            continue;
-        };
-        if !cpu.is_finite() || !mem.is_finite() {
-            continue;
-        }
-
-        let sample_interval_ms = cols
-            .next()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(fallback_interval_ms);
-
-        cpus.push(cpu);
-        mems.push(mem);
-        if temp_str != "-"
-            && let Ok(temp) = temp_str.parse::<f32>()
-            && temp.is_finite()
-        {
+        cpus.push(pt.cpu_pct);
+        mems.push(pt.mem_pct);
+        if let Some(temp) = pt.temp_c {
             temps.push(temp);
         }
-        if net == 0 {
-            down_ms = down_ms.saturating_add(sample_interval_ms);
+        if !pt.net_ok {
+            down_ms = down_ms.saturating_add(pt.interval_ms);
         }
     }
 
@@ -248,16 +200,14 @@ fn metric_bit(metric: &str) -> u8 {
 /// Returns dates with complete required metrics in `history_path`,
 /// stripping any partial/interrupted daily entries before new rollups append.
 fn prepare_history_state(history_path: &Path) -> io::Result<HashSet<Date>> {
-    let file = match File::open(history_path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashSet::new()),
-        Err(e) => return Err(e),
+    let Some(reader) = crate::open_if_exists(history_path)? else {
+        return Ok(HashSet::new());
     };
 
     let mut lines = Vec::new();
     let mut masks: HashMap<Date, u8> = HashMap::new();
 
-    for line_res in BufReader::new(file).lines() {
+    for line_res in reader.lines() {
         let line = line_res?;
         let trimmed = line.trim();
         if !trimmed.is_empty() && !trimmed.starts_with('#') {
@@ -343,23 +293,20 @@ fn append_rollup_to_history(history_path: &Path, rollup: &DailyRollup) -> io::Re
     );
 
     file.write_all(buf.as_bytes())?;
-    file.flush()?;
 
     Ok(())
 }
 
 fn prune_history(history_path: &Path, today: Date, history_days: u64) -> io::Result<()> {
-    let file = match File::open(history_path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
+    let Some(reader) = crate::open_if_exists(history_path)? else {
+        return Ok(());
     };
 
     let max_age = i64::try_from(history_days).unwrap_or(i64::MAX);
     let mut kept_lines = Vec::new();
     let mut removed_any = false;
 
-    for line_res in BufReader::new(file).lines() {
+    for line_res in reader.lines() {
         let line = line_res?;
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -385,18 +332,29 @@ fn prune_history(history_path: &Path, today: Date, history_days: u64) -> io::Res
     rewrite_lines_atomically(history_path, &kept_lines)
 }
 
+fn tmp_path_for(target: &Path) -> io::Result<PathBuf> {
+    let mut name = target
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?
+        .to_os_string();
+    name.push(".tmp");
+    Ok(target.with_file_name(name))
+}
+
 fn rewrite_lines_atomically(target: &Path, lines: &[String]) -> io::Result<()> {
-    let tmp_path = target.with_extension("log.tmp");
-    {
-        let tmp_file = File::create(&tmp_path)?;
-        let mut writer = BufWriter::new(tmp_file);
+    let tmp_path = tmp_path_for(target)?;
+    let write_res = (|| {
+        let mut writer = BufWriter::new(File::create(&tmp_path)?);
         for line in lines {
             writeln!(writer, "{line}")?;
         }
-        writer.flush()?;
+        writer.flush()
+    })();
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
     }
-    fs::rename(&tmp_path, target)?;
-    Ok(())
+    fs::rename(&tmp_path, target)
 }
 
 fn retire_log(path: &Path, archive_dir: &Path, archive_type: &ArchiveType) -> io::Result<()> {
@@ -433,7 +391,7 @@ fn move_file(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 fn gzip_file(src: &Path, dst_gz: &Path) -> io::Result<()> {
-    let tmp_gz = dst_gz.with_extension("gz.tmp");
+    let tmp_gz = tmp_path_for(dst_gz)?;
     let mut input = BufReader::new(File::open(src)?);
     let out_file = File::create(&tmp_gz)?;
     let mut encoder = GzEncoder::new(BufWriter::new(out_file), Compression::default());
@@ -458,19 +416,48 @@ mod tests {
     use flate2::read::GzDecoder;
     use std::io::Read as _;
     use std::net::SocketAddr;
-    use std::process::Command;
     use time::macros::date;
 
     fn extract_fixture_to(dir: &Path) -> Result<()> {
         let archive =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/two_weeks_logs.tar.gz");
-        let status = Command::new("tar")
-            .arg("-xzf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(dir)
-            .status()?;
-        assert!(status.success(), "tar failed with status: {status}");
+        let mut decoder = GzDecoder::new(File::open(&archive)?);
+        let mut hdr = [0u8; 512];
+        loop {
+            match decoder.read_exact(&mut hdr) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(err) => return Err(err.into()),
+            }
+            if hdr.iter().all(|&b| b == 0) {
+                break;
+            }
+            let name_end = hdr[..100].iter().position(|&b| b == 0).unwrap_or(100);
+            let raw_name = std::str::from_utf8(&hdr[..name_end])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let size_str = std::str::from_utf8(&hdr[124..136])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                .trim_matches(|c: char| c == '\0' || c.is_ascii_whitespace());
+            let size = usize::from_str_radix(size_str, 8)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+            let rel = raw_name.trim_start_matches("./");
+            let is_file = matches!(hdr[156], b'0' | 0);
+            if is_file && !rel.is_empty() && !rel.contains("..") {
+                let mut content = vec![0u8; size];
+                decoder.read_exact(&mut content)?;
+                fs::write(dir.join(rel), &content)?;
+            } else if size > 0 {
+                let mut skip = vec![0u8; size];
+                decoder.read_exact(&mut skip)?;
+            }
+
+            let pad = (512 - (size % 512)) % 512;
+            if pad > 0 {
+                let mut skip = [0u8; 512];
+                decoder.read_exact(&mut skip[..pad])?;
+            }
+        }
         Ok(())
     }
 
