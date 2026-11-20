@@ -1,13 +1,13 @@
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use time::Date;
-use time::macros::format_description;
 
-use crate::{ArchiveType, Config};
+use crate::{ArchiveType, Config, Result, parse_date_str};
 
 const HISTORY_FILE: &str = "history.log";
 const HISTORY_HEADER: &str = "# date metric min avg max p95";
@@ -55,7 +55,7 @@ struct DailyRollup {
     net_down_sec: u64,
 }
 
-pub fn rollup_and_retire(config: &Config, today: &Date) -> Result<(), Box<dyn std::error::Error>> {
+pub fn rollup_and_retire(config: &Config, today: &Date) -> Result<()> {
     let logs = collect_past_logs(&config.log_dir, *today)?;
     let history_path = config.log_dir.join(HISTORY_FILE);
     let mut rolled_dates = prepare_history_state(&history_path)?;
@@ -99,17 +99,8 @@ pub fn rollup_and_retire(config: &Config, today: &Date) -> Result<(), Box<dyn st
     Ok(())
 }
 
-fn parse_date_str(s: &str) -> Option<Date> {
-    let time_format = format_description!("[year]-[month]-[day]");
-    Date::parse(s, &time_format).ok()
-}
-
 fn parse_log_date(filename: &str, kind: LogKind) -> Option<Date> {
-    let date_part = filename
-        .strip_prefix(kind.as_str())? //you shall not format me damm rust
-        .strip_prefix('-')?
-        .strip_suffix(".log")?;
-    parse_date_str(date_part)
+    crate::parse_prefixed_log_date(filename, kind.as_str())
 }
 
 fn collect_past_logs(log_dir: &Path, today: Date) -> io::Result<Vec<DatedLog>> {
@@ -443,71 +434,34 @@ fn move_file(src: &Path, dst: &Path) -> io::Result<()> {
 
 fn gzip_file(src: &Path, dst_gz: &Path) -> io::Result<()> {
     let tmp_gz = dst_gz.with_extension("gz.tmp");
+    let mut input = BufReader::new(File::open(src)?);
     let out_file = File::create(&tmp_gz)?;
+    let mut encoder = GzEncoder::new(BufWriter::new(out_file), Compression::default());
 
-    let status = Command::new("gzip")
-        .arg("-c")
-        .arg(src)
-        .stdout(out_file)
-        .status();
-
-    match status {
-        Ok(s) if s.success() => {
-            fs::rename(&tmp_gz, dst_gz)?;
-            fs::remove_file(src)?;
-            Ok(())
-        }
-        Ok(s) => {
-            let _ = fs::remove_file(&tmp_gz);
-            Err(io::Error::other(format!("gzip exited with status: {s}")))
-        }
-        Err(err) => {
-            let _ = fs::remove_file(&tmp_gz);
-            Err(err)
-        }
+    if let Err(err) = io::copy(&mut input, &mut encoder)
+        .and_then(|_| encoder.finish())
+        .and_then(|mut writer| writer.flush())
+    {
+        let _ = fs::remove_file(&tmp_gz);
+        return Err(err);
     }
+
+    fs::rename(&tmp_gz, dst_gz)?;
+    fs::remove_file(src)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestTempDir;
+    use flate2::read::GzDecoder;
+    use std::io::Read as _;
     use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::process::Command;
     use time::macros::date;
 
-    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TestTempDir {
-        path: PathBuf,
-    }
-
-    impl TestTempDir {
-        fn new(prefix: &str) -> io::Result<Self> {
-            let base = std::env::temp_dir();
-            let pid = std::process::id();
-            loop {
-                let seq = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let candidate = base.join(format!("beholder_{prefix}_{pid}_{seq}"));
-                match fs::create_dir(&candidate) {
-                    Ok(()) => return Ok(Self { path: candidate }),
-                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(err) => return Err(err),
-                }
-            }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TestTempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
-
-    fn extract_fixture_to(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn extract_fixture_to(dir: &Path) -> Result<()> {
         let archive =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/two_weeks_logs.tar.gz");
         let status = Command::new("tar")
@@ -521,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rotate_and_idempotency() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_rotate_and_idempotency() -> Result<()> {
         let work_dir = TestTempDir::new("rotate")?;
         extract_fixture_to(work_dir.path())?;
 
@@ -534,6 +488,7 @@ mod tests {
             archive_type: ArchiveType::Gzip,
             network_target: SocketAddr::from(([1, 1, 1, 1], 53)),
             mounts: vec![PathBuf::from("/")],
+            ..Config::default()
         };
 
         let today = date!(2026 - 11 - 15);
@@ -566,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_past_logs_from_fixture() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_collect_past_logs_from_fixture() -> Result<()> {
         let work_dir = TestTempDir::new("collect_past_logs")?;
         extract_fixture_to(work_dir.path())?;
 
@@ -579,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn test_summarize_raw_log_and_missing_temp() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_summarize_raw_log_and_missing_temp() -> Result<()> {
         let work_dir = TestTempDir::new("summarize")?;
         let log_path = work_dir.path().join("raw-2026-11-10.log");
         fs::write(
@@ -607,8 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn test_incomplete_history_entry_is_repaired_on_rollup()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn test_incomplete_history_entry_is_repaired_on_rollup() -> Result<()> {
         let work_dir = TestTempDir::new("repair_history")?;
         let raw_path = work_dir.path().join("raw-2026-11-01.log");
         fs::write(
@@ -634,6 +588,7 @@ mod tests {
             archive_type: ArchiveType::None,
             network_target: SocketAddr::from(([1, 1, 1, 1], 53)),
             mounts: vec![PathBuf::from("/")],
+            ..Config::default()
         };
 
         rollup_and_retire(&config, &date!(2026 - 11 - 15))?;
@@ -649,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn test_retire_plain_and_none() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_retire_plain_and_none() -> Result<()> {
         let work_dir = TestTempDir::new("retire_modes")?;
         let archive_dir = work_dir.path().join("archive");
 
@@ -667,6 +622,15 @@ mod tests {
         retire_log(&none_src, &archive_dir, &ArchiveType::None)?;
         assert!(!none_src.exists());
         assert!(!archive_dir.join("raw-2026-11-02.log").exists());
+
+        let gz_src = work_dir.path().join("raw-2026-11-03.log");
+        fs::write(&gz_src, "compressed payload\n")?;
+        retire_log(&gz_src, &archive_dir, &ArchiveType::Gzip)?;
+        assert!(!gz_src.exists());
+        let mut decoder = GzDecoder::new(File::open(archive_dir.join("raw-2026-11-03.log.gz"))?);
+        let mut decoded = String::new();
+        decoder.read_to_string(&mut decoded)?;
+        assert_eq!(decoded, "compressed payload\n");
 
         Ok(())
     }

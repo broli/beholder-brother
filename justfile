@@ -28,10 +28,10 @@ pedantic-test:
 fmt:
     cargo fmt
 
-# Build optimized release binary and show size
+# Build optimized release binaries and show sizes
 release:
     cargo build --release
-    @ls -lh target/release/beholder-brother
+    @ls -lh target/release/beholder target/release/brother
 
 # Clean cargo artifacts and /tmp/test/
 clean:

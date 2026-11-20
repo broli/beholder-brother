@@ -1,52 +1,13 @@
+#![forbid(unsafe_code)]
+
+use beholder_brother::{ArchiveType, Config, Error, Result, return_today, rollout, savelog, sense};
 use lexopt::prelude::*;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-use time::{Date, OffsetDateTime};
 
-mod rollout;
-mod savelog;
-mod sense;
-
-struct Config {
-    interval_ms: u64,
-    log_dir: PathBuf,
-    retain_days: u64,
-    history_days: u64,
-    archive_dir: PathBuf,
-    archive_type: ArchiveType,
-    network_target: SocketAddr,
-    mounts: Vec<PathBuf>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            interval_ms: 10000,
-            log_dir: PathBuf::from("/var/log/beholder"),
-            retain_days: 7,
-            history_days: 180,
-            archive_dir: PathBuf::from("/var/log/beholder/archive"),
-            archive_type: ArchiveType::Gzip,
-            network_target: SocketAddr::from(([1, 1, 1, 1], 53)),
-            mounts: vec![PathBuf::from("/")],
-        }
-    }
-}
-
-#[derive(Default)]
-pub enum ArchiveType {
-    Plain,
-    #[default]
-    Gzip,
-    None,
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let running = Arc::new(AtomicBool::new(true));
-    //not cloning, since i used ARC, this is a second pointer to the same heap space
     let r = running.clone();
 
     ctrlc::set_handler(move || {
@@ -54,67 +15,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         r.store(false, Ordering::SeqCst);
     })?;
 
-    // read command args
-    let config = match parse_args()? {
-        Some(cfg) => cfg,
-        None => return Ok(()),
+    let Some(config) = parse_args()? else {
+        return Ok(());
     };
 
-    let mut prev_cpu = sense::PreviousCpuTick::new();
+    let mut prev_cpu = sense::PreviousCpuTick::default();
+    let mut logs = savelog::DailyLogs::new(config.log_dir.clone(), config.flush_each_sample);
     let mut tick: u64 = 0;
-
     let mut last_rotate_day = None;
 
     while running.load(Ordering::SeqCst) {
-        // read sensor data
         let sample = sense::sense(&config, &mut prev_cpu)?;
-        //println!("Sample: {:?}", sample);
-        savelog::append_sample(&config.log_dir, &sample, config.interval_ms)?;
+        logs.append_sample(&sample, config.interval_ms)?;
 
-        if tick.is_multiple_of(60) {
+        if tick == 0 {
             let disk_samples = sense::sense_disks(&config)?;
-            savelog::append_disks(&config.log_dir, sample.timestamp, &disk_samples)?;
-            // println!("Disk samples: {:?}", disk_samples);
-            tick = 0;
+            logs.append_disks(sample.timestamp, &disk_samples)?;
         }
+
         let today = return_today()?;
         if last_rotate_day != Some(today) {
+            logs.flush()?;
             if let Err(err) = rollout::rollup_and_retire(&config, &today) {
                 eprintln!("Rollup/retire error for {today}: {err}");
             }
             last_rotate_day = Some(today);
         }
 
-        tick += 1;
-        // nap for configured time
+        tick = (tick + 1) % 60;
         std::thread::sleep(std::time::Duration::from_millis(config.interval_ms));
     }
-    println!("\nDaemon stopped  \"cleanly\".");
+
+    logs.flush()?;
+    println!("\nDaemon stopped cleanly.");
     Ok(())
 }
 
 fn print_usage() {
     println!(
-        r#"Usage: beholder [OPTIONS]
+        r"Usage: beholder [OPTIONS]
 
 Options:
     -h, --help                  Print this help message
     -v, --version               Print version information
     -i, --interval <MS>         Sampling interval in ms (default: 10000)
     -l, --log-dir <PATH>        Directory for raw data (default: /var/log/beholder)
-    -r, --retain-days <DAYS>    amount of days to retain daily detailed logs. Default to 7 days
-    -H, --history-days <DAYS>   amount of days to retain history logs. Default to 180 days. More will look bad in the charts
-    -A, --archive <TYPE>        Create a compressed archive of the daily logs instead of deleting them. Can use none for no archive, gzip (default) for compressed, and plain for uncompressed. 
+    -r, --retain-days <DAYS>    Days to retain daily detailed logs (default: 7)
+    -H, --history-days <DAYS>   Days to retain history logs (default: 180)
+    -A, --archive <TYPE>        none | gzip (default) | plain
     -n, --network <ADDR>        TCP address to probe for connectivity (default: 1.1.1.1:53)
-    -m, --mount                 Path to mount points (default: /) (it can be repeated)
-
-Sensors:
-    - CPU load %
-    - Memory usage %
-    - Disk usage % (considerng 5% root reserve as used)
-    - Temperature (°C)
-    - Network uptime (probe 1/0)
-"#
+    -m, --mount <PATH>          Mount point to track; repeatable (default: /)
+    -F, --flush                 Flush every sample immediately to disk (disables 4 KB write buffer)
+"
     );
 }
 
@@ -122,7 +74,7 @@ fn print_version() {
     println!("Beholder Version {}", env!("CARGO_PKG_VERSION"));
 }
 
-fn parse_args() -> Result<Option<Config>, Box<dyn std::error::Error>> {
+fn parse_args() -> Result<Option<Config>> {
     let mut parser = lexopt::Parser::from_env();
     let mut cfg = Config::default();
     let mut custom_mounts = false;
@@ -157,11 +109,10 @@ fn parse_args() -> Result<Option<Config>, Box<dyn std::error::Error>> {
                     Some("gzip") => ArchiveType::Gzip,
                     Some("plain") => ArchiveType::Plain,
                     _ => {
-                        return Err(format!(
+                        return Err(Error::InvalidArg(format!(
                             "invalid archive type: {}",
                             archive_type.to_string_lossy()
-                        )
-                        .into());
+                        )));
                     }
                 };
             }
@@ -178,26 +129,11 @@ fn parse_args() -> Result<Option<Config>, Box<dyn std::error::Error>> {
                     cfg.mounts.push(path);
                 }
             }
+            Short('F') | Long("flush") => {
+                cfg.flush_each_sample = true;
+            }
             _ => return Err(arg.unexpected().into()),
         }
     }
     Ok(Some(cfg))
 }
-
-pub fn return_today() -> Result<Date, Box<dyn std::error::Error>> {
-    Ok(OffsetDateTime::from_unix_timestamp(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64,
-    )?
-    .date())
-}
-
-#[cfg(debug_assertions)]
-fn print_debug(msg: &str) {
-    eprintln!("[debug] {msg}");
-}
-
-#[cfg(not(debug_assertions))]
-fn print_debug(_msg: &str) {}

@@ -26,14 +26,14 @@ Telemetry is bifurcated into two independent storage tiers:
          ▼
 ┌──────────────────────────────┐
 │  Tier 1: High-Res Daily Logs │  `raw-YYYY-MM-DD.log`
-│  (8,640 samples / ~300 KB)   │  Retained for N days (default: 2)
+│  (8,640 samples / ~300 KB)   │  Retained for N days (default: 7)
 └──────────────┬───────────────┘
                │
-               │ Midnight Rollup Pass (`beholder --rollup`)
+               │ Midnight Rollup Pass
                ▼
 ┌──────────────────────────────┐
 │  Tier 2: Historical Summary  │  `history.log`
-│  (1 line per metric per day) │  Retained for M days (default: 90)
+│  (1 line per metric per day) │  Retained for M days (default: 180)
 └──────────────────────────────┘
 ```
 
@@ -41,10 +41,12 @@ Telemetry is bifurcated into two independent storage tiers:
   - Filename format: `raw-YYYY-MM-DD.log`.
   - Captures 10-second volatile metrics (CPU, Memory, Thermals, Network reachability).
   - Purpose: Real-time monitoring and short-term post-crash forensic analysis.
+  - Default retention: `7` days.
 - **Tier 2 (Historical Rollup Database)**:
   - Filename: `history.log`.
   - Captures daily statistical reductions per metric: `min`, `avg`, `max`, `p95`, `net_down_sec`.
   - Purpose: Multi-month seasonal trend visualization.
+  - Default retention: `180` days.
 
 ---
 
@@ -61,28 +63,29 @@ Telemetry is bifurcated into two independent storage tiers:
 
 | Configuration Flag | Default | Allowed Range | Technical Justification |
 | :--- | :--- | :--- | :--- |
-| **`--retain-days`** | `2` days | 1 – 30 days (Warn if $>7$) | 2 days handles weekend power outages while keeping raw logs under 1 MB. $>7$ days ($>60,000$ points) risks client rendering lag on low-power devices. |
-| **`--history-days`** | `90` days | 1 – 730 days | 90 days (~3 months) allocates ~10 pixels per day on a standard 1080p display, enabling clear bar/point legibility without complex pan/zoom controls. |
-| **`--archive`** | `none` | `none`, `gzip` | `none` unlinks expired daily files. `gzip` compresses expired files to `raw-YYYY-MM-DD.log.gz` (~35 KB) for operators who want deep archival. |
+| **`--retain-days`** | `7` days | 1 – 30 days | 7 days covers a full week of 10-second diagnostics (~2.1 MB raw) without noticeable overhead. |
+| **`--history-days`** | `180` days | 1 – 730 days | 180 days (~6 months) gives clear multi-season trends in `history.log` while staying ~29 KB. |
+| **`--archive`** | `gzip` | `none`, `gzip`, `plain` | `gzip` compresses expired files to `archive/raw-YYYY-MM-DD.log.gz` (~35 KB) by default; `none` unlinks them; `plain` moves them uncompressed. |
 
 ---
 
-### Decision 4: Storage Footprint Guarantees
+### Decision 4: Storage Footprint
 
-Under default settings (`--retain-days 2 --history-days 90 --archive none`):
-- Active raw logs: $2 \times 300\text{ KB} = 600\text{ KB}$.
-- Historical summary: $90 \times 160\text{ bytes} \approx 14.4\text{ KB}$.
-- Disks log: $90 \text{ days} \times 144 \text{ entries} \approx 350\text{ KB}$.
-- **Total Maximum Disk Footprint**: **$< 1.5\text{ MB}$ permanently bounded**.
+Under default settings (`--retain-days 7 --history-days 180 --archive gzip`):
+- Active raw logs: $7 \times 300\text{ KB} \approx 2.1\text{ MB}$.
+- Active disk logs: $7 \times 4\text{ KB} \approx 28\text{ KB}$.
+- Historical summary: $180 \times 160\text{ bytes} \approx 28.8\text{ KB}$.
+- Archived logs (`archive/*.gz`): grows by ~35 KB per retired day (~12.8 MB/year) because expired archives are not auto-pruned.
+- **Strictly bounded mode (`--archive none`)**: Unlinks expired logs instead of archiving, keeping total disk usage **$< 2.5\text{ MB}$ permanently bounded**.
 
 ---
 
 ## 3. Consequences
 
 - **Positive**:
-  - The storage budget is mathematically bounded; the daemon can run for years without filling disks.
+  - Active `raw-*.log` and `history.log` are strictly bounded; with `--archive none`, the daemon can run for years without filling disks.
   - Zero-cost cleanup via `unlink()`.
-  - Visualizer loads instantly because historical summaries never exceed ~15–30 KB.
+  - Visualizer loads instantly because historical summaries never exceed ~30 KB.
 - **Trade-offs**:
-  - High-resolution (10s) data older than `retain_days` is permanently reduced to daily aggregates (or archived to `.gz` if enabled).
+  - High-resolution (10s) data older than `retain_days` is permanently reduced to daily aggregates (or archived to `archive/*.gz` if `--archive gzip` is enabled, which grows ~12.8 MB/year unless pruned externally).
 
